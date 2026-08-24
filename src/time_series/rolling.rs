@@ -11,7 +11,7 @@ use polars::prelude::*;
 pub enum RollingFn {
     /// Rolling mean over the window.
     Mean,
-    /// Rolling (sample) standard deviation over the window.
+    /// Rolling (population) standard deviation over the window.
     Std,
     /// Rolling minimum over the window.
     Min,
