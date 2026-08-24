@@ -22,7 +22,19 @@
 //! column list (frame order for auto-discovered columns; the user-supplied
 //! order for explicit columns) — no lexicographic reordering is applied.
 //!
+//! # Name collisions
+//!
+//! Generated names use the `_x_` separator (e.g. `a_x_b`). If an input
+//! column already carries a generated name — for example the input already
+//! contains a column literally named `a_x_b` — [`transform`](Transform::transform)
+//! returns [`Error::InvalidInput`] instead of silently overwriting it.
+//! Similarly, input column names that themselves contain `_x_` (e.g.
+//! `p_x_q`) can make two distinct pairs produce the same generated name;
+//! that is also rejected. Rename such columns before fitting.
+//!
 //! [`PolynomialFeatures`]: crate::preprocessing::polynomial_features::PolynomialFeatures
+
+use std::collections::HashSet;
 
 use crate::traits::{Error, Fit, Result, Transform};
 use crate::util::{numeric_f64_columns, series_mul};
@@ -32,8 +44,9 @@ use polars::prelude::*;
 /// interaction column name (e.g. `a_x_b`).
 ///
 /// Note: if an input column name itself contains `_x_`, the generated name
-/// may be ambiguous. Callers in such cases should rename their inputs before
-/// fitting.
+/// may be ambiguous; configurations where two distinct pairs produce the
+/// same generated name are rejected at transform time rather than silently
+/// overwritten.
 const NAME_SEP: &str = "_x_";
 
 /// Generate pairwise interaction features (`a·b`) without the full
@@ -224,6 +237,28 @@ impl Transform<DataFrame> for InteractionFeatures {
                 (start..n).map(move |j| (i, j))
             })
             .collect();
+
+        // Reject name collisions up front: `DataFrame::with_column` silently
+        // REPLACES an existing column with the same name, so without this
+        // check a collision would silently destroy input data. The `used`
+        // set starts with the input columns and also catches two distinct
+        // pairs that produce the same generated name (possible when input
+        // names contain `_x_`).
+        let mut used: HashSet<String> = out
+            .get_column_names()
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        for (i, j) in &pairs {
+            let out_name = format!("{}{}{}", self.columns[*i], NAME_SEP, self.columns[*j]);
+            if !used.insert(out_name.clone()) {
+                return Err(Error::InvalidInput(format!(
+                    "{who}.transform: generated column '{out_name}' collides with an \
+                     existing input column or a previously generated column. Rename the \
+                     conflicting column(s) or choose different column names."
+                )));
+            }
+        }
 
         for (i, j) in pairs {
             let name_i = &self.columns[i];
@@ -532,5 +567,61 @@ mod tests {
         assert_eq!(d.columns, n.columns);
         assert_eq!(d.include_self_products, n.include_self_products);
         assert_eq!(d.fitted, n.fitted);
+    }
+
+    #[test]
+    fn test_interaction_name_collision_errors() {
+        // Input already contains a column literally named a_x_b.
+        let a = Column::from(Series::new("a".into(), &[1.0_f64, 2.0, 3.0]));
+        let b = Column::from(Series::new("b".into(), &[4.0_f64, 5.0, 6.0]));
+        let clash = Column::from(Series::new("a_x_b".into(), &[7.0_f64, 8.0, 9.0]));
+        let df = DataFrame::new(3, vec![a, b, clash]).unwrap();
+
+        let mut xf = InteractionFeatures::builder().columns(&["a", "b"]).build();
+        xf.fit(df.clone()).unwrap();
+        let err = xf.transform(df).unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidInput(_)),
+            "collision with an existing column must error, not overwrite"
+        );
+        assert!(err.to_string().contains("a_x_b"));
+    }
+
+    #[test]
+    fn test_interaction_separator_in_names_still_generates() {
+        // Column names containing the separator produce distinct names here;
+        // this is the non-colliding separator case.
+        let p = Column::from(Series::new("p".into(), &[1.0_f64, 2.0, 3.0]));
+        let q_x_r = Column::from(Series::new("q_x_r".into(), &[4.0_f64, 5.0, 6.0]));
+        let r = Column::from(Series::new("r".into(), &[7.0_f64, 8.0, 9.0]));
+        let df = DataFrame::new(3, vec![p, q_x_r, r]).unwrap();
+
+        // fitted order: [p, q_x_r, r]
+        // pairs: (p, q_x_r) -> p_x_q_x_r, (p, r) -> p_x_r,
+        //        (q_x_r, r) -> q_x_r_x_r
+        let mut xf = InteractionFeatures::builder().build();
+        xf.fit(df.clone()).unwrap();
+        let out = xf.transform(df).unwrap();
+        assert!(out.column("p_x_q_x_r").is_ok());
+        assert!(out.column("p_x_r").is_ok());
+        assert!(out.column("q_x_r_x_r").is_ok());
+    }
+
+    #[test]
+    fn test_interaction_generated_name_collision_errors() {
+        // Two distinct pairs produce the same generated name because the
+        // input names contain the separator: (a, b_x_c) and (a_x_b, c)
+        // both generate "a_x_b_x_c".
+        let a = Column::from(Series::new("a".into(), &[1.0_f64, 2.0, 3.0]));
+        let b_x_c = Column::from(Series::new("b_x_c".into(), &[4.0_f64, 5.0, 6.0]));
+        let a_x_b = Column::from(Series::new("a_x_b".into(), &[7.0_f64, 8.0, 9.0]));
+        let c = Column::from(Series::new("c".into(), &[10.0_f64, 11.0, 12.0]));
+        let df = DataFrame::new(3, vec![a, b_x_c, a_x_b, c]).unwrap();
+
+        let mut xf = InteractionFeatures::builder().build();
+        xf.fit(df.clone()).unwrap();
+        let err = xf.transform(df).unwrap_err();
+        assert!(matches!(err, Error::InvalidInput(_)));
+        assert!(err.to_string().contains("a_x_b_x_c"));
     }
 }
