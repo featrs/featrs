@@ -24,6 +24,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   perfect separators score positive infinity, and small real variance remains
   distinguishable at large offsets. Null target rows are excluded without
   losing alignment with their corresponding feature rows (#147).
+- `InteractionFeatures.transform` now rejects generated-name collisions
+  instead of silently overwriting input data: if an input column already has
+  a name that a generated product column would take (e.g. a column literally
+  named `a_x_b`), or two distinct pairs generate the same name because input
+  names contain the `_x_` separator, `transform` returns `Error::InvalidInput`
+  naming the conflict — matching the existing `RatioFeatures` behavior (#142).
 
 ## [0.4.0] - 2026-08-22
 
