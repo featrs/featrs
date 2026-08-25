@@ -30,6 +30,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   named `a_x_b`), or two distinct pairs generate the same name because input
   names contain the `_x_` separator, `transform` returns `Error::InvalidInput`
   naming the conflict — matching the existing `RatioFeatures` behavior (#142).
+- `Binarizer.transform` no longer conflates missing data with a
+  below-threshold value: `NaN` inputs are now emitted as null (matching the
+  polars-null pass-through behavior of sibling transformers) instead of
+  silently becoming `0.0`. Non-finite thresholds (`NaN`, ±`Inf`) are rejected
+  at fit time with `Error::InvalidInput` — previously every value silently
+  binarized to `0.0` under a `NaN` threshold (#141).
 
 ## [0.4.0] - 2026-08-22
 

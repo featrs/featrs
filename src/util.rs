@@ -59,6 +59,20 @@ pub fn replace_f64_column<F>(df: &mut DataFrame, name: &str, who: &str, f: F) ->
 where
     F: Fn(f64) -> f64,
 {
+    replace_f64_column_opt(df, name, who, move |v| Some(f(v)))
+}
+
+/// Apply a per-element optional f64 transform to a single named column of `df`,
+/// replacing the column in place.
+///
+/// Unlike [`replace_f64_column`], `f` may return `None` to emit a null,
+/// letting callers map sentinel values such as `NaN` to missing data instead
+/// of a computed value. Input nulls never reach `f` and stay null.
+/// `who` names the calling transformer for error context.
+pub fn replace_f64_column_opt<F>(df: &mut DataFrame, name: &str, who: &str, f: F) -> Result<()>
+where
+    F: Fn(f64) -> Option<f64>,
+{
     let s = df.column(name).map_err(|e| {
         Error::InvalidInput(format!("{who}.transform: column '{name}' not found. {e}"))
     })?;
@@ -68,7 +82,7 @@ where
             s.dtype()
         ))
     })?;
-    let mapped: ChunkedArray<Float64Type> = ca.iter().map(|opt| opt.map(&f)).collect();
+    let mapped: ChunkedArray<Float64Type> = ca.iter().map(|opt| opt.and_then(&f)).collect();
     df.replace(name, mapped.into_series().into()).map_err(|e| {
         Error::Computation(format!(
             "{who}.transform: failed to replace column '{name}'. {e}"
@@ -167,4 +181,50 @@ pub(crate) fn series_div(a: &Series, b: &Series, epsilon: f64, who: &str) -> Res
         })
         .collect();
     Ok(result.into_series())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use polars::prelude::{Column, NamedFrom};
+
+    #[test]
+    fn test_replace_f64_column_opt_maps_none_to_null() {
+        let x = Column::from(Series::new(
+            "x".into(),
+            &[Some(1.0), Some(f64::NAN), Some(-3.0)],
+        ));
+        let mut df = DataFrame::new(3, vec![x]).unwrap();
+
+        replace_f64_column_opt(&mut df, "x", "Test", |v| {
+            if v.is_nan() { None } else { Some(v) }
+        })
+        .unwrap();
+
+        let vals: Vec<Option<f64>> = df.column("x").unwrap().f64().unwrap().iter().collect();
+        assert_eq!(vals[0], Some(1.0));
+        assert!(vals[1].is_none(), "None from the closure must become null");
+        assert_eq!(vals[2], Some(-3.0));
+    }
+
+    #[test]
+    fn test_replace_f64_column_opt_missing_column_errors() {
+        let mut df = DataFrame::new(0, Vec::<Column>::new()).unwrap();
+        let err = replace_f64_column_opt(&mut df, "nope", "Test", Some).unwrap_err();
+        assert!(
+            err.to_string().contains("not found"),
+            "error should name the missing column"
+        );
+    }
+
+    #[test]
+    fn test_replace_f64_column_opt_wrong_dtype_errors() {
+        let s = Column::from(Series::new("s".into(), &["a".to_string(), "b".to_string()]));
+        let mut df = DataFrame::new(2, vec![s]).unwrap();
+        let err = replace_f64_column_opt(&mut df, "s", "Test", Some).unwrap_err();
+        assert!(
+            err.to_string().contains("expected Float64"),
+            "error should mention the dtype requirement"
+        );
+    }
 }
