@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- `LeaveOneOutEncoder.transform` no longer silently returns full-sample target
+  means when the transform frame is not the exact training frame (a row subset,
+  new rows, or a different column set), which leaked each row's own target into
+  the training features. It now returns `Error::InvalidInput` in that case, and
+  a new explicit `transform_unseen` method applies the full-sample per-category
+  means for genuinely new data (#135).
+
 ## [0.4.0] - 2026-08-25
 
 ### Added
