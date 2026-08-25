@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.4.0] - 2026-08-25
 
 ### Added
 
@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `RollingAggregator` no longer compacts nulls out of fixed-size windows:
+  input nulls keep their row positions and a window containing a missing
+  value produces a missing result, so output length always matches input
+  length. Null-free aggregation behavior is unchanged (#146).
 - `FClassif` now uses centered accumulation for ANOVA means and sums of
   squares, so decimal-valued constant features score `0.0`, decimal-valued
   perfect separators score positive infinity, and small real variance remains
