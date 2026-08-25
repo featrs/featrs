@@ -14,6 +14,8 @@ pub trait ScoreFunction: Send + Sync {
     /// Score each feature in `x` against the target `y`.
     ///
     /// Returns a list of `(column_name, score)` pairs for numeric columns.
+    /// Scores may be positive infinity when a feature separates the target
+    /// perfectly. Equal scores retain their input-column order in [`SelectKBest`].
     fn score(&self, x: &DataFrame, y: &Column) -> Result<Vec<(String, f64)>>;
 }
 
@@ -27,7 +29,12 @@ pub trait ScoreFunction: Send + Sync {
 ///
 /// Where `SS_between` is the between-group sum of squares and `SS_within`
 /// is the within-group sum of squares. Higher F-values indicate stronger
-/// class separation.
+/// class separation. A feature with zero within-class variance and non-zero
+/// between-class variance scores positive infinity; a constant feature scores
+/// zero. Rows with a null feature value or null target are excluded per column,
+/// and the degrees of freedom are computed from the remaining observations. A
+/// feature with no usable values, or with fewer than two observed target
+/// classes, is rejected.
 ///
 /// Requires the target column to be [`Float64`](DataType::Float64).
 pub struct FClassif;
@@ -55,10 +62,7 @@ impl ScoreFunction for FClassif {
                 y.dtype()
             ))
         })?;
-        let y_vals: Vec<f64> = y_ca.iter().flatten().collect();
-        let n = y_vals.len() as f64;
-        let y_mean = y_vals.iter().sum::<f64>() / n;
-
+        let y_vals: Vec<Option<f64>> = y_ca.iter().collect();
         let mut classes: Vec<f64> = y_ca.iter().flatten().collect();
         classes.sort_by(|a, b| a.total_cmp(b));
         classes.dedup();
@@ -71,11 +75,11 @@ impl ScoreFunction for FClassif {
             )));
         }
 
-        if n != x.height() as f64 {
+        if y_vals.len() != x.height() {
             return Err(Error::InvalidInput(format!(
                 "FClassif: feature rows ({}) and target rows ({}) don't match.",
                 x.height(),
-                n
+                y_vals.len()
             )));
         }
 
@@ -95,38 +99,80 @@ impl ScoreFunction for FClassif {
                 ))
             })?;
             let vals: Vec<Option<f64>> = ca.iter().collect();
+            let observed: Vec<(f64, f64)> = vals
+                .iter()
+                .zip(&y_vals)
+                .filter_map(|(&xv, &yv)| match (xv, yv) {
+                    (Some(value), Some(target)) => Some((value, target)),
+                    _ => None,
+                })
+                .collect();
+            if observed.is_empty() {
+                return Err(Error::InvalidInput(format!(
+                    "FClassif: column '{name}' has no non-null values. Impute or drop it first."
+                )));
+            }
+
+            let feature_origin = observed[0].0;
+            let feature_mean_offset = observed
+                .iter()
+                .map(|(value, _)| value - feature_origin)
+                .sum::<f64>()
+                / observed.len() as f64;
+            let mut observed_classes: Vec<f64> =
+                observed.iter().map(|(_, target)| *target).collect();
+            observed_classes.sort_by(|a, b| a.total_cmp(b));
+            observed_classes.dedup();
+            if observed_classes.len() < 2 {
+                return Err(Error::InvalidInput(format!(
+                    "FClassif: column '{name}' has only one target class after excluding nulls. \
+                     Impute or drop it first."
+                )));
+            }
 
             let mut ss_between = 0.0;
             let mut ss_within = 0.0;
 
-            for &cls in &classes {
-                let group_vals: Vec<f64> = vals
+            for &cls in &observed_classes {
+                let group_vals: Vec<f64> = observed
                     .iter()
-                    .zip(&y_vals)
-                    .filter_map(|(xv, &yv)| if (yv - cls).abs() < 1e-10 { *xv } else { None })
+                    .filter_map(|&(value, target)| {
+                        if (target - cls).abs() < 1e-10 {
+                            Some(value)
+                        } else {
+                            None
+                        }
+                    })
                     .collect();
 
-                if group_vals.is_empty() {
-                    continue;
-                }
-                let g_mean = group_vals.iter().sum::<f64>() / group_vals.len() as f64;
+                let group_origin = group_vals[0];
                 let g_n = group_vals.len() as f64;
+                let group_mean_offset = group_vals
+                    .iter()
+                    .map(|value| value - group_origin)
+                    .sum::<f64>()
+                    / g_n;
+                let group_to_feature_mean =
+                    (group_origin - feature_origin) + group_mean_offset - feature_mean_offset;
 
-                ss_between += g_n * (g_mean - y_mean).powi(2);
+                ss_between += g_n * group_to_feature_mean.powi(2);
 
                 for &v in &group_vals {
-                    ss_within += (v - g_mean).powi(2);
+                    ss_within += ((v - group_origin) - group_mean_offset).powi(2);
                 }
             }
 
-            let n_classes = classes.len() as f64;
+            let n_observed = observed.len() as f64;
+            let n_classes = observed_classes.len() as f64;
             let df_between = n_classes - 1.0;
-            let df_within = n - n_classes;
+            let df_within = n_observed - n_classes;
 
-            let f_stat = if ss_within > 1e-15 && df_within > 0.0 {
-                (ss_between / df_between) / (ss_within / df_within)
-            } else {
+            let f_stat = if ss_within == 0.0 {
+                if ss_between > 0.0 { f64::INFINITY } else { 0.0 }
+            } else if df_within <= 0.0 {
                 0.0
+            } else {
+                (ss_between / df_between) / (ss_within / df_within)
             };
 
             scores.push((name, f_stat));
@@ -317,6 +363,286 @@ mod tests {
 
         let scores = f.score(&features, &y_col).unwrap();
         assert_eq!(scores.len(), 2);
+    }
+
+    #[test]
+    fn test_f_classif_perfect_separator_scores_infinity() {
+        let features = DataFrame::new(
+            4,
+            vec![
+                Column::from(Series::new("constant".into(), &[5.0_f64; 4])),
+                Column::from(Series::new("perfect".into(), &[0.0_f64, 0.0, 1.0, 1.0])),
+            ],
+        )
+        .unwrap();
+        let target = Column::from(Series::new("target".into(), &[0.0_f64, 0.0, 1.0, 1.0]));
+
+        let scores = FClassif::new().score(&features, &target).unwrap();
+
+        assert_eq!(scores[0], ("constant".to_string(), 0.0));
+        assert_eq!(scores[1].0, "perfect");
+        assert_eq!(scores[1].1, f64::INFINITY);
+    }
+
+    #[test]
+    fn test_f_classif_two_sample_perfect_separator_scores_infinity() {
+        let features = DataFrame::new(
+            2,
+            vec![Column::from(Series::new("perfect".into(), &[0.0_f64, 1.0]))],
+        )
+        .unwrap();
+        let target = Column::from(Series::new("target".into(), &[0.0_f64, 1.0]));
+
+        let scores = FClassif::new().score(&features, &target).unwrap();
+
+        assert_eq!(scores, vec![("perfect".to_string(), f64::INFINITY)]);
+    }
+
+    #[test]
+    fn test_f_classif_decimal_constant_scores_zero() {
+        let features = DataFrame::new(
+            3,
+            vec![Column::from(Series::new(
+                "constant".into(),
+                &[0.1_f64, 0.1, 0.1],
+            ))],
+        )
+        .unwrap();
+        let target = Column::from(Series::new("target".into(), &[0.0_f64, 0.0, 1.0]));
+
+        let scores = FClassif::new().score(&features, &target).unwrap();
+
+        assert_eq!(scores, vec![("constant".to_string(), 0.0)]);
+    }
+
+    #[test]
+    fn test_f_classif_decimal_perfect_separator_scores_infinity() {
+        let features = DataFrame::new(
+            5,
+            vec![Column::from(Series::new(
+                "perfect".into(),
+                &[0.1_f64, 0.1, 0.1, 0.2, 0.2],
+            ))],
+        )
+        .unwrap();
+        let target = Column::from(Series::new("target".into(), &[0.0_f64, 0.0, 0.0, 1.0, 1.0]));
+
+        let scores = FClassif::new().score(&features, &target).unwrap();
+
+        assert_eq!(scores, vec![("perfect".to_string(), f64::INFINITY)]);
+    }
+
+    #[test]
+    fn test_f_classif_preserves_one_ulp_variance_at_large_scale() {
+        let low = 1.0e9_f64;
+        let low_next = f64::from_bits(low.to_bits() + 1);
+        let high = low + 1_000.0;
+        let high_next = f64::from_bits(high.to_bits() + 1);
+        let features = DataFrame::new(
+            4,
+            vec![Column::from(Series::new(
+                "varying".into(),
+                &[low, low_next, high, high_next],
+            ))],
+        )
+        .unwrap();
+        let target = Column::from(Series::new("target".into(), &[0.0_f64, 0.0, 1.0, 1.0]));
+
+        let scores = FClassif::new().score(&features, &target).unwrap();
+
+        assert!(scores[0].1.is_finite());
+        assert!(scores[0].1 > 0.0);
+    }
+
+    #[test]
+    fn test_f_classif_keeps_half_ulp_means_centered() {
+        let base = 1.0e16_f64;
+        let next = f64::from_bits(base.to_bits() + 1);
+        let next_next = f64::from_bits(base.to_bits() + 2);
+        let features = DataFrame::new(
+            4,
+            vec![Column::from(Series::new(
+                "centered".into(),
+                &[base, next, next, next_next],
+            ))],
+        )
+        .unwrap();
+        let target = Column::from(Series::new("target".into(), &[0.0_f64, 0.0, 1.0, 1.0]));
+
+        let scores = FClassif::new().score(&features, &target).unwrap();
+
+        assert_eq!(scores, vec![("centered".to_string(), 2.0)]);
+    }
+
+    #[test]
+    fn test_f_classif_partial_null_uses_observed_degrees_of_freedom() {
+        let features = DataFrame::new(
+            4,
+            vec![Column::from(Series::new(
+                "partial".into(),
+                &[Some(0.0_f64), None, Some(2.0), Some(4.0)],
+            ))],
+        )
+        .unwrap();
+        let target = Column::from(Series::new("target".into(), &[0.0_f64, 0.0, 1.0, 1.0]));
+
+        let scores = FClassif::new().score(&features, &target).unwrap();
+
+        assert_eq!(scores[0].0, "partial");
+        assert!((scores[0].1 - 3.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_f_classif_null_target_preserves_row_alignment() {
+        let features = DataFrame::new(
+            4,
+            vec![Column::from(Series::new(
+                "aligned".into(),
+                &[0.0_f64, 1_000.0, 2.0, 4.0],
+            ))],
+        )
+        .unwrap();
+        let target = Column::from(Series::new(
+            "target".into(),
+            &[Some(0.0_f64), None, Some(1.0), Some(1.0)],
+        ));
+
+        let scores = FClassif::new().score(&features, &target).unwrap();
+
+        assert_eq!(scores[0].0, "aligned");
+        assert!((scores[0].1 - 3.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_f_classif_validates_physical_target_row_count() {
+        let features = DataFrame::new(
+            3,
+            vec![Column::from(Series::new(
+                "feature".into(),
+                &[0.0_f64, 1.0, 2.0],
+            ))],
+        )
+        .unwrap();
+        let target = Column::from(Series::new(
+            "target".into(),
+            &[Some(0.0_f64), None, Some(1.0), Some(1.0)],
+        ));
+
+        let error = FClassif::new().score(&features, &target).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("feature rows (3) and target rows (4) don't match")
+        );
+    }
+
+    #[test]
+    fn test_select_kbest_ranks_partial_null_feature_by_observed_rows() {
+        let features = DataFrame::new(
+            4,
+            vec![
+                Column::from(Series::new(
+                    "partial".into(),
+                    &[Some(0.0_f64), None, Some(2.0), Some(4.0)],
+                )),
+                Column::from(Series::new("complete".into(), &[0.0_f64, 2.0, 3.0, 5.0])),
+            ],
+        )
+        .unwrap();
+        let target = Column::from(Series::new("target".into(), &[0.0_f64, 0.0, 1.0, 1.0]));
+        let y = DataFrame::new(4, vec![target]).unwrap();
+        let mut skb = SelectKBest::new(1, Box::new(FClassif::new()));
+
+        skb.fit(features.clone(), y).unwrap();
+
+        assert_eq!(skb.scores().unwrap()[0], ("complete".to_string(), 4.5));
+        assert_eq!(
+            skb.transform(features).unwrap().get_column_names(),
+            &["complete"]
+        );
+    }
+
+    #[test]
+    fn test_f_classif_all_null_feature_errors() {
+        let features = DataFrame::new(
+            4,
+            vec![Column::from(Series::new(
+                "all_null".into(),
+                &[None::<f64>; 4],
+            ))],
+        )
+        .unwrap();
+        let target = Column::from(Series::new("target".into(), &[0.0_f64, 0.0, 1.0, 1.0]));
+
+        let error = FClassif::new().score(&features, &target).unwrap_err();
+
+        assert!(error.to_string().contains("no non-null values"));
+    }
+
+    #[test]
+    fn test_f_classif_feature_with_one_observed_class_errors() {
+        let features = DataFrame::new(
+            4,
+            vec![Column::from(Series::new(
+                "one_class".into(),
+                &[Some(0.0_f64), Some(1.0), None, None],
+            ))],
+        )
+        .unwrap();
+        let target = Column::from(Series::new("target".into(), &[0.0_f64, 0.0, 1.0, 1.0]));
+
+        let error = FClassif::new().score(&features, &target).unwrap_err();
+
+        assert!(error.to_string().contains("only one target class"));
+    }
+
+    #[test]
+    fn test_select_kbest_ranks_perfect_separator_first() {
+        let features = DataFrame::new(
+            6,
+            vec![
+                make_features().column("signal").unwrap().clone(),
+                Column::from(Series::new(
+                    "perfect".into(),
+                    &[0.0_f64, 0.0, 0.0, 1.0, 1.0, 1.0],
+                )),
+            ],
+        )
+        .unwrap();
+        let y = DataFrame::new(6, vec![make_target_col()]).unwrap();
+        let mut skb = SelectKBest::new(1, Box::new(FClassif::new()));
+
+        skb.fit(features.clone(), y).unwrap();
+
+        assert_eq!(skb.scores().unwrap()[0].0, "perfect");
+        let selected = skb.transform(features).unwrap();
+        assert_eq!(selected.get_column_names(), &["perfect"]);
+    }
+
+    #[test]
+    fn test_select_kbest_breaks_infinite_ties_by_input_order() {
+        let features = DataFrame::new(
+            4,
+            vec![
+                Column::from(Series::new("first".into(), &[0.0_f64, 0.0, 1.0, 1.0])),
+                Column::from(Series::new("second".into(), &[2.0_f64, 2.0, 3.0, 3.0])),
+            ],
+        )
+        .unwrap();
+        let target = Column::from(Series::new("target".into(), &[0.0_f64, 0.0, 1.0, 1.0]));
+        let y = DataFrame::new(4, vec![target]).unwrap();
+        let mut skb = SelectKBest::new(2, Box::new(FClassif::new()));
+
+        skb.fit(features, y).unwrap();
+
+        let names: Vec<&str> = skb
+            .scores()
+            .unwrap()
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect();
+        assert_eq!(names, ["first", "second"]);
     }
 
     #[test]

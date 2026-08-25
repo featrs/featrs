@@ -11,7 +11,7 @@ use polars::prelude::*;
 pub enum RollingFn {
     /// Rolling mean over the window.
     Mean,
-    /// Rolling (sample) standard deviation over the window.
+    /// Rolling (population) standard deviation over the window.
     Std,
     /// Rolling minimum over the window.
     Min,
@@ -22,6 +22,9 @@ pub enum RollingFn {
 }
 
 /// Compute rolling window statistics.
+///
+/// Input nulls retain their row positions. A complete window containing a
+/// null produces a null result.
 ///
 /// # Example
 ///
@@ -62,7 +65,7 @@ impl RollingAggregator {
         let ca = s
             .f64()
             .map_err(|_| Error::InvalidInput("column must be f64".into()))?;
-        let vals: Vec<f64> = ca.iter().flatten().collect();
+        let vals: Vec<Option<f64>> = ca.iter().collect();
         let n = vals.len();
         let w = self.window_size;
 
@@ -73,22 +76,36 @@ impl RollingAggregator {
                 } else {
                     let start = i + 1 - w;
                     let window = &vals[start..=i];
-                    match self.function {
-                        RollingFn::Mean => Some(window.iter().sum::<f64>() / w as f64),
-                        RollingFn::Sum => Some(window.iter().sum()),
-                        RollingFn::Min => {
-                            window.iter().cloned().fold(f64::INFINITY, f64::min).into()
-                        }
-                        RollingFn::Max => window
-                            .iter()
-                            .cloned()
-                            .fold(f64::NEG_INFINITY, f64::max)
-                            .into(),
-                        RollingFn::Std => {
-                            let mean = window.iter().sum::<f64>() / w as f64;
-                            let var =
-                                window.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / w as f64;
-                            Some(var.sqrt())
+                    if window.iter().any(Option::is_none) {
+                        None
+                    } else {
+                        match self.function {
+                            RollingFn::Mean => {
+                                Some(window.iter().flatten().copied().sum::<f64>() / w as f64)
+                            }
+                            RollingFn::Sum => Some(window.iter().flatten().copied().sum()),
+                            RollingFn::Min => window
+                                .iter()
+                                .flatten()
+                                .copied()
+                                .fold(f64::INFINITY, f64::min)
+                                .into(),
+                            RollingFn::Max => window
+                                .iter()
+                                .flatten()
+                                .copied()
+                                .fold(f64::NEG_INFINITY, f64::max)
+                                .into(),
+                            RollingFn::Std => {
+                                let mean = window.iter().flatten().copied().sum::<f64>() / w as f64;
+                                let var = window
+                                    .iter()
+                                    .flatten()
+                                    .map(|v| (v - mean).powi(2))
+                                    .sum::<f64>()
+                                    / w as f64;
+                                Some(var.sqrt())
+                            }
                         }
                     }
                 }
@@ -168,7 +185,22 @@ impl Transform<DataFrame> for RollingAggregator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use approx::assert_relative_eq;
+
+    fn rolling_mean(vals: &[Option<f64>], window_size: usize) -> Vec<Option<f64>> {
+        let col = Column::from(Series::new("x".into(), vals));
+        let df = DataFrame::new(vals.len(), vec![col]).unwrap();
+        let mut r = RollingAggregator::new(&["x"], window_size, RollingFn::Mean);
+        r.fit(df.clone()).unwrap();
+        let result = r.transform(df).unwrap();
+
+        result
+            .column(&format!("x_mean_{window_size}"))
+            .unwrap()
+            .f64()
+            .unwrap()
+            .iter()
+            .collect()
+    }
 
     #[test]
     fn test_rolling_mean() {
@@ -181,8 +213,25 @@ mod tests {
 
         assert_eq!(result.width(), 2);
         let rolled = result.column("x_mean_3").unwrap().f64().unwrap();
-        assert!(rolled.get(0).is_none());
-        assert!(rolled.get(1).is_none());
-        assert_relative_eq!(rolled.get(2).unwrap(), 2.0, epsilon = 1e-6);
+        assert_eq!(
+            rolled.iter().collect::<Vec<_>>(),
+            vec![None, None, Some(2.0), Some(3.0), Some(4.0)]
+        );
+    }
+
+    #[test]
+    fn test_interior_nulls_invalidate_containing_windows() {
+        assert_eq!(
+            rolling_mean(&[Some(1.0), None, Some(3.0), Some(4.0)], 2),
+            vec![None, None, None, Some(3.5)]
+        );
+    }
+
+    #[test]
+    fn test_leading_and_trailing_nulls_remain_aligned() {
+        assert_eq!(
+            rolling_mean(&[None, Some(2.0), Some(4.0), None], 2),
+            vec![None, None, Some(3.0), None]
+        );
     }
 }
