@@ -42,18 +42,24 @@ use std::collections::HashMap;
 ///   place as `Float64` (even a column with no usable target rows — its
 ///   non-null values become the global mean); non-string columns pass through
 ///   unchanged at their original position/dtype.
-/// - Transforming the **exact training frame** (a frame equal to the one
-///   passed to [`fit`](FitSupervised::fit), value-for-value including nulls)
-///   returns the per-row leave-one-out encodings. Transforming any **other**
-///   frame (e.g. new rows) returns the full-sample per-category means —
-///   leave-one-out is only defined for the rows that were present during
-///   `fit`, so new rows cannot be leakage-free.
+/// - [`transform`](Transform::transform) accepts only the **exact training
+///   frame** (the frame passed to [`fit`](FitSupervised::fit), or that frame
+///   with its columns reordered — matched by column name, value-for-value
+///   including nulls, with rows in the original order). It returns the per-row
+///   leave-one-out encodings. Any
+///   **other** frame — a row subset, new rows, or a different column set —
+///   returns [`Error::InvalidInput`] instead of silently falling back to
+///   full-sample means, which would leak each row's own target into the
+///   training features. For genuinely new data, call
+///   [`transform_unseen`](LeaveOneOutEncoder::transform_unseen), which applies
+///   the full-sample per-category means explicitly.
 /// - A category with exactly one usable training row is a *singleton*: leaving
 ///   its single row out leaves `0 / 0`. In the training (leave-one-out) path
-///   that row is therefore encoded as the global target mean; in the new-data
-///   path it is encoded with the smoothed full-sample mean (see `alpha`).
-/// - Categories seen at transform time but not during fit are encoded as the
-///   global target mean.
+///   that row is therefore encoded as the global target mean; in the
+///   unseen-data path ([`transform_unseen`](LeaveOneOutEncoder::transform_unseen))
+///   it is encoded with the smoothed full-sample mean (see `alpha`).
+/// - Categories seen at [`transform_unseen`](LeaveOneOutEncoder::transform_unseen)
+///   time but not during fit are encoded as the global target mean.
 /// - Null category values are preserved as null. Rows whose target value is
 ///   null or non-finite are excluded from the category statistics and from the
 ///   global mean; such a row is encoded from the remaining usable rows of its
@@ -94,8 +100,10 @@ pub struct LeaveOneOutEncoder {
     encodings: Option<Vec<HashMap<String, f64>>>,
     /// Global target mean over all usable (finite) rows.
     global_mean: Option<f64>,
-    /// The exact feature frame passed to `fit`, used to detect when `transform`
-    /// is applied to the training data (so the per-row LOO encodings are used).
+    /// The feature frame passed to `fit`, used to detect when `transform` is
+    /// applied to the training data (so the per-row LOO encodings are used).
+    /// Matched by column name in any order with rows in the original order, so a
+    /// column reorder of the training frame is still detected as training data.
     training_source: Option<DataFrame>,
     /// The training frame with fitted columns replaced by their per-row
     /// leave-one-out `Float64` encodings.
@@ -128,6 +136,105 @@ impl LeaveOneOutEncoder {
     pub fn alpha(mut self, a: f64) -> Self {
         self.alpha = a;
         self
+    }
+
+    /// Encode data with the full-sample per-category target means, opting in
+    /// explicitly to encoding rows that were not present during fit.
+    ///
+    /// [`transform`](Transform::transform) rejects any frame that is not the
+    /// exact training frame with [`Error::InvalidInput`], because leave-one-out
+    /// is only defined for the rows seen during fit and silently returning
+    /// full-sample means would leak each row's own target into the training
+    /// features. `transform_unseen` is the explicit escape hatch for genuinely
+    /// new (unseen) data: every category is replaced by its full-sample mean
+    /// (including the row's own category contribution), categories not seen
+    /// during fit are replaced by the global target mean, and null category
+    /// values are preserved as null.
+    ///
+    /// The encoder must be fitted first; otherwise [`Error::NotFitted`] is
+    /// returned.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use featrs::preprocessing::encoder_loo::LeaveOneOutEncoder;
+    /// use featrs::traits::FitSupervised;
+    /// use polars::prelude::{Column, DataFrame, NamedFrom, Series};
+    ///
+    /// let cat = Column::from(Series::new("cat".into(), &["a", "a"]));
+    /// let x = DataFrame::new(2, vec![cat])?;
+    /// let target = Column::from(Series::new("y".into(), &[0.0_f64, 10.0]));
+    /// let y = DataFrame::new(2, vec![target])?;
+    ///
+    /// let mut enc = LeaveOneOutEncoder::new();
+    /// enc.fit(x, y)?;
+    /// let new = DataFrame::new(2, vec![Column::from(Series::new(
+    ///     "cat".into(),
+    ///     &["a", "zzz"],
+    /// ))])?;
+    /// // Known and unseen categories both resolve to the full-sample mean (5.0).
+    /// let vals: Vec<f64> = enc
+    ///     .transform_unseen(new)?
+    ///     .column("cat")?
+    ///     .f64()?
+    ///     .iter()
+    ///     .flatten()
+    ///     .collect();
+    /// assert_eq!(vals, vec![5.0, 5.0]);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn transform_unseen(&self, x: DataFrame) -> Result<DataFrame> {
+        let (names, encodings, global_mean) =
+            match (&self.column_names, &self.encodings, self.global_mean) {
+                (Some(n), Some(e), Some(g)) => (n, e, g),
+                _ => {
+                    return Err(Error::NotFitted(
+                        "LeaveOneOutEncoder has not been fitted. \
+                         Call .fit(x, y) before .transform_unseen()."
+                            .into(),
+                    ));
+                }
+            };
+
+        // Full-sample per-category means: leave-one-out is impossible for rows
+        // that were not present during fit. Include each row's own category
+        // contribution (this is the explicit opt-in path for new data).
+        let mut out = x;
+        for (name, mapping) in names.iter().zip(encodings.iter()) {
+            let s = out.column(name.as_str()).map_err(|e| {
+                Error::InvalidInput(format!(
+                    "LeaveOneOutEncoder.transform_unseen: column '{name}' not found. \
+                     The encoder was fitted on columns: {:?}. {}",
+                    names.iter().collect::<Vec<_>>(),
+                    e
+                ))
+            })?;
+            let ca = s.as_materialized_series().str().map_err(|e| {
+                Error::InvalidInput(format!(
+                    "LeaveOneOutEncoder.transform_unseen: column '{name}' has dtype {}; \
+                     expected String. {}",
+                    s.dtype(),
+                    e
+                ))
+            })?;
+
+            let encoded: ChunkedArray<Float64Type> = ca
+                .iter()
+                .map(|opt| opt.map(|v| mapping.get(v).copied().unwrap_or(global_mean)))
+                .collect();
+            let mut series = encoded.into_series();
+            series.rename(name.as_str().into());
+            out.replace(name.as_str(), Column::from(series))
+                .map_err(|e| {
+                    Error::Computation(format!(
+                        "LeaveOneOutEncoder.transform_unseen: failed to replace column \
+                     '{name}'. {}",
+                        e
+                    ))
+                })?;
+        }
+
+        Ok(out)
     }
 }
 
@@ -367,14 +474,12 @@ impl Transform<DataFrame> for LeaveOneOutEncoder {
                     .into(),
             ));
         }
-        let (names, encodings, global_mean, training_source, training_loo) = match (
+        let (names, training_source, training_loo) = match (
             &self.column_names,
-            &self.encodings,
-            self.global_mean,
             &self.training_source,
             &self.training_loo,
         ) {
-            (Some(n), Some(e), Some(g), Some(s), Some(l)) => (n, e, g, s, l),
+            (Some(n), Some(s), Some(l)) => (n, s, l),
             _ => {
                 return Err(Error::NotFitted(
                     "LeaveOneOutEncoder has not been fitted. \
@@ -384,77 +489,55 @@ impl Transform<DataFrame> for LeaveOneOutEncoder {
             }
         };
 
-        // If we are transforming the exact training frame (same number of
-        // columns, and every column value-for-value equal including nulls),
-        // return the per-row leave-one-out encodings (each row's own target
-        // was excluded during fit).
+        // The per-row leave-one-out encodings are only meaningful for the exact
+        // training frame. Detect it by matching every training column by name,
+        // value-for-value including nulls, in any order — so a column reorder of
+        // the training frame still counts as training data.
         let is_training_frame = x.width() == training_source.width()
-            && training_source
-                .columns()
-                .iter()
-                .all(|sc| match x.column(sc.name()) {
-                    Ok(xc) => xc.equals_missing(sc),
-                    Err(_) => false,
-                });
+            && training_source.columns().iter().all(|sc| {
+                x.column(sc.name())
+                    .map(|xc| xc.equals_missing(sc))
+                    .unwrap_or(false)
+            });
 
-        if is_training_frame {
-            let mut out = x;
-            for name in names {
-                let loo_col = training_loo.column(name.as_str()).map_err(|e| {
-                    Error::Computation(format!(
-                        "LeaveOneOutEncoder.transform: missing stored encoding for column \
-                         '{}'. {}\n        This is an internal inconsistency: the encoder was fitted \
-                         successfully but has no leave-one-out column for a fitted name.",
-                        name, e
-                    ))
-                })?;
-                out.replace(name.as_str(), loo_col.clone()).map_err(|e| {
-                    Error::Computation(format!(
-                        "LeaveOneOutEncoder.transform: failed to replace column '{}'. {}",
-                        name, e
-                    ))
-                })?;
-            }
-            return Ok(out);
+        if !is_training_frame {
+            // Reject anything that is not the training frame rather than
+            // silently returning full-sample means. For a row subset of the
+            // training frame — or genuinely new rows — those means would include
+            // each row's own target value and leak it into the training
+            // features. New data must opt in explicitly via `transform_unseen`.
+            return Err(Error::InvalidInput(format!(
+                "LeaveOneOutEncoder.transform requires the exact training frame \
+                 (its columns may be reordered). Got a frame with {} columns x {} \
+                 rows but the training frame has {} columns x {} rows. Leave-one-out \
+                 is only defined for the rows present during fit, so a row subset or \
+                 new data cannot be encoded without leaking each row's own target. \
+                 Call .transform_unseen(x) to encode new data with full-sample \
+                 per-category means.",
+                x.width(),
+                x.height(),
+                training_source.width(),
+                training_source.height()
+            )));
         }
 
-        // New data: full-sample per-category means (no leave-one-out is
-        // possible for rows that were not present during fit).
         let mut out = x;
-        for (name, mapping) in names.iter().zip(encodings.iter()) {
-            let s = out.column(name.as_str()).map_err(|e| {
-                Error::InvalidInput(format!(
-                    "LeaveOneOutEncoder.transform: column '{}' not found. \
-                     The encoder was fitted on columns: {:?}. {}",
-                    name,
-                    names.iter().collect::<Vec<_>>(),
-                    e
+        for name in names {
+            let loo_col = training_loo.column(name.as_str()).map_err(|e| {
+                Error::Computation(format!(
+                    "LeaveOneOutEncoder.transform: missing stored encoding for column \
+                     '{}'. {}\n        This is an internal inconsistency: the encoder was fitted \
+                     successfully but has no leave-one-out column for a fitted name.",
+                    name, e
                 ))
             })?;
-            let ca = s.as_materialized_series().str().map_err(|e| {
-                Error::InvalidInput(format!(
-                    "LeaveOneOutEncoder.transform: column '{}' has dtype {}; expected String. {}",
-                    name,
-                    s.dtype(),
-                    e
+            out.replace(name.as_str(), loo_col.clone()).map_err(|e| {
+                Error::Computation(format!(
+                    "LeaveOneOutEncoder.transform: failed to replace column '{}'. {}",
+                    name, e
                 ))
             })?;
-
-            let encoded: ChunkedArray<Float64Type> = ca
-                .iter()
-                .map(|opt| opt.map(|v| mapping.get(v).copied().unwrap_or(global_mean)))
-                .collect();
-            let mut series = encoded.into_series();
-            series.rename(name.as_str().into());
-            out.replace(name.as_str(), Column::from(series))
-                .map_err(|e| {
-                    Error::Computation(format!(
-                        "LeaveOneOutEncoder.transform: failed to replace column '{}'. {}",
-                        name, e
-                    ))
-                })?;
         }
-
         Ok(out)
     }
 }
@@ -562,7 +645,7 @@ mod tests {
     }
 
     #[test]
-    fn test_new_data_uses_full_sample_mean_not_loo() {
+    fn test_unseen_data_uses_full_sample_mean_not_loo() {
         let cat = Column::from(Series::new("cat".into(), &["a", "a"]));
         let x = DataFrame::new(2, vec![cat]).unwrap();
         let target = Column::from(Series::new("y".into(), &[0.0_f64, 10.0]));
@@ -573,7 +656,7 @@ mod tests {
 
         let new_cat = Column::from(Series::new("cat".into(), &["a", "zzz"]));
         let new_data = DataFrame::new(2, vec![new_cat]).unwrap();
-        let result = enc.transform(new_data).unwrap();
+        let result = enc.transform_unseen(new_data).unwrap();
 
         let vals: Vec<f64> = result
             .column("cat")
@@ -600,7 +683,7 @@ mod tests {
 
         let unseen = Column::from(Series::new("cat".into(), &["a", "zzz"]));
         let df = DataFrame::new(2, vec![unseen]).unwrap();
-        let result = enc.transform(df).unwrap();
+        let result = enc.transform_unseen(df).unwrap();
 
         let vals: Vec<f64> = result
             .column("cat")
@@ -889,7 +972,7 @@ mod tests {
 
         let new_cat = Column::from(Series::new("cat".into(), &["a", "a"]));
         let new_data = DataFrame::new(2, vec![new_cat]).unwrap();
-        let result = enc.transform(new_data).unwrap();
+        let result = enc.transform_unseen(new_data).unwrap();
         let vals: Vec<f64> = result
             .column("cat")
             .unwrap()
@@ -900,5 +983,160 @@ mod tests {
             .collect();
         assert!(vals[0].is_finite());
         assert!(vals[1].is_finite());
+    }
+
+    #[test]
+    fn test_row_subset_of_fit_frame_is_rejected() {
+        let cat = Column::from(Series::new("cat".into(), &["a", "a", "b"]));
+        let x = DataFrame::new(3, vec![cat]).unwrap();
+        let target = Column::from(Series::new("y".into(), &[0.0_f64, 10.0, 5.0]));
+        let y = DataFrame::new(3, vec![target]).unwrap();
+
+        let mut enc = LeaveOneOutEncoder::new();
+        enc.fit(x.clone(), y).unwrap();
+
+        // A row subset of the training frame must not fall back to full-sample
+        // means (which would leak each row's own target); it errors instead.
+        let subset = x.slice(0, 2);
+        match enc.transform(subset) {
+            Err(Error::InvalidInput(_)) => {}
+            other => panic!(
+                "expected InvalidInput for a row subset, got {:?}",
+                other.map(|_| ())
+            ),
+        }
+    }
+
+    #[test]
+    fn test_reordered_columns_same_values_as_training_frame() {
+        let c1 = Column::from(Series::new("c1".into(), &["a", "b", "a"]));
+        let c2 = Column::from(Series::new("c2".into(), &["x", "x", "y"]));
+        let x = DataFrame::new(3, vec![c1, c2]).unwrap();
+        let target = Column::from(Series::new("y".into(), &[1.0_f64, 0.0, 1.0]));
+        let y = DataFrame::new(3, vec![target]).unwrap();
+
+        let mut enc = LeaveOneOutEncoder::new();
+        enc.fit(x.clone(), y).unwrap();
+
+        let baseline = enc.transform(x.clone()).unwrap();
+
+        // Reorder the columns (same data, different layout): the per-row LOO
+        // encodings must be identical to the fit-frame transform.
+        let reordered = DataFrame::new(
+            3,
+            vec![
+                x.column("c2").unwrap().clone(),
+                x.column("c1").unwrap().clone(),
+            ],
+        )
+        .unwrap();
+        let result = enc.transform(reordered).unwrap();
+
+        let names = result.get_column_names();
+        assert_eq!(names.len(), 2);
+        assert_eq!(names[0].as_str(), "c2");
+        assert_eq!(names[1].as_str(), "c1");
+
+        let base_c1: Vec<f64> = baseline
+            .column("c1")
+            .unwrap()
+            .f64()
+            .unwrap()
+            .iter()
+            .flatten()
+            .collect();
+        let got_c1: Vec<f64> = result
+            .column("c1")
+            .unwrap()
+            .f64()
+            .unwrap()
+            .iter()
+            .flatten()
+            .collect();
+        let base_c2: Vec<f64> = baseline
+            .column("c2")
+            .unwrap()
+            .f64()
+            .unwrap()
+            .iter()
+            .flatten()
+            .collect();
+        let got_c2: Vec<f64> = result
+            .column("c2")
+            .unwrap()
+            .f64()
+            .unwrap()
+            .iter()
+            .flatten()
+            .collect();
+        // The stored LOO columns are copied verbatim, so values are identical.
+        assert_eq!(base_c1, got_c1);
+        assert_eq!(base_c2, got_c2);
+    }
+
+    #[test]
+    fn test_single_row_known_category_via_unseen() {
+        let cat = Column::from(Series::new("cat".into(), &["a", "a"]));
+        let x = DataFrame::new(2, vec![cat]).unwrap();
+        let target = Column::from(Series::new("y".into(), &[0.0_f64, 10.0]));
+        let y = DataFrame::new(2, vec![target]).unwrap();
+
+        let mut enc = LeaveOneOutEncoder::new();
+        enc.fit(x, y).unwrap();
+
+        // A single row of a known category resolves to its full-sample mean.
+        let single =
+            DataFrame::new(1, vec![Column::from(Series::new("cat".into(), &["a"]))]).unwrap();
+        let result = enc.transform_unseen(single).unwrap();
+        let vals: Vec<f64> = result
+            .column("cat")
+            .unwrap()
+            .f64()
+            .unwrap()
+            .iter()
+            .flatten()
+            .collect();
+        assert_relative_eq!(vals[0], 5.0, epsilon = 1e-12);
+    }
+
+    #[test]
+    fn test_transform_unseen_preserves_null_categories() {
+        let cat = Column::from(Series::new("cat".into(), &["a", "a"]));
+        let x = DataFrame::new(2, vec![cat]).unwrap();
+        let target = Column::from(Series::new("y".into(), &[0.0_f64, 10.0]));
+        let y = DataFrame::new(2, vec![target]).unwrap();
+
+        let mut enc = LeaveOneOutEncoder::new();
+        enc.fit(x, y).unwrap();
+
+        let unseen = DataFrame::new(
+            2,
+            vec![Column::from(Series::new("cat".into(), &[Some("a"), None]))],
+        )
+        .unwrap();
+        let result = enc.transform_unseen(unseen).unwrap();
+        let vals: Vec<Option<f64>> = result
+            .column("cat")
+            .unwrap()
+            .f64()
+            .unwrap()
+            .iter()
+            .collect();
+        assert_relative_eq!(vals[0].unwrap(), 5.0, epsilon = 1e-12);
+        assert!(
+            vals[1].is_none(),
+            "null category must stay null in unseen data"
+        );
+    }
+
+    #[test]
+    fn test_transform_unseen_before_fit_returns_not_fitted() {
+        let enc = LeaveOneOutEncoder::new();
+        let cat = Column::from(Series::new("cat".into(), &["a"]));
+        let x = DataFrame::new(1, vec![cat]).unwrap();
+        match enc.transform_unseen(x) {
+            Err(Error::NotFitted(_)) => {}
+            other => panic!("expected NotFitted, got {:?}", other.map(|_| ())),
+        }
     }
 }
