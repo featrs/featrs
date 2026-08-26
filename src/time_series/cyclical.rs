@@ -12,6 +12,11 @@ use polars::prelude::*;
 /// For each column, computes `sin(2π * x / period)` and
 /// `cos(2π * x / period)`, preserving the cyclic relationship.
 ///
+/// Periods are validated at [`fit`](Fit::fit) time: every period must be
+/// finite and `>= 1`; otherwise `fit` returns [`Error::InvalidInput`] whose
+/// message contains `period must be >= 1`. A zero (or non-positive) period
+/// would divide by zero and silently emit `NaN`/`±Inf` encodings.
+///
 /// # Example
 ///
 /// ```rust
@@ -61,6 +66,7 @@ impl Fit<DataFrame> for CyclicalEncoder {
     type Output = ();
 
     fn fit(&mut self, x: DataFrame) -> Result<()> {
+        self.fitted = false;
         let n_cols = x.width();
         if x.height() == 0 || n_cols == 0 {
             return Err(Error::InvalidInput(
@@ -86,6 +92,13 @@ impl Fit<DataFrame> for CyclicalEncoder {
                     "CyclicalEncoder: column '{}' has dtype {}; expected Float64.",
                     col,
                     s.dtype()
+                )));
+            }
+        }
+        for (col, period) in &self.columns {
+            if !period.is_finite() || *period < 1.0 {
+                return Err(Error::InvalidInput(format!(
+                    "CyclicalEncoder: period must be >= 1 (got {period} for column '{col}')."
                 )));
             }
         }
@@ -222,5 +235,80 @@ mod tests {
             "Expected Error::InvalidInput containing 'at least one column is required', got: {:?}",
             err
         );
+    }
+
+    #[test]
+    fn test_zero_period_rejected_new() {
+        let vals = Column::from(Series::new("hour".into(), &[0.0_f64, 6.0]));
+        let df = DataFrame::new(2, vec![vals]).unwrap();
+        let mut enc = CyclicalEncoder::new(&["hour"], 0);
+        let err = enc.fit(df).unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidInput(ref msg) if msg.contains("period must be >= 1")),
+            "Expected Error::InvalidInput containing 'period must be >= 1', got: {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_zero_period_rejected_with_periods() {
+        let vals = Column::from(Series::new("hour".into(), &[0.0_f64, 6.0]));
+        let df = DataFrame::new(2, vec![vals]).unwrap();
+        let mut enc = CyclicalEncoder::with_periods(&[("hour", 0)]);
+        let err = enc.fit(df).unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidInput(ref msg) if msg.contains("period must be >= 1")),
+            "Expected Error::InvalidInput containing 'period must be >= 1', got: {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_period_one_boundary() {
+        // period = 1 is the smallest valid period: integer values land at
+        // multiples of 2π, so sin ≈ 0 and cos ≈ 1.
+        let vals = Column::from(Series::new("hour".into(), &[0.0_f64, 1.0, 3.0]));
+        let df = DataFrame::new(3, vec![vals]).unwrap();
+        let mut enc = CyclicalEncoder::new(&["hour"], 1);
+
+        enc.fit(df.clone()).unwrap();
+        let result = enc.transform(df).unwrap();
+
+        assert_eq!(result.width(), 3); // hour, hour_sin, hour_cos
+        let sin = result.column("hour_sin").unwrap().f64().unwrap();
+        let cos = result.column("hour_cos").unwrap().f64().unwrap();
+
+        for i in 0..3 {
+            let s = sin.get(i).unwrap();
+            let c = cos.get(i).unwrap();
+            assert!(
+                s.is_finite() && c.is_finite(),
+                "period=1 outputs must be finite, got sin={s}, cos={c}"
+            );
+            assert_relative_eq!(s, 0.0, epsilon = 1e-6);
+            assert_relative_eq!(c, 1.0, epsilon = 1e-6);
+        }
+    }
+
+    #[test]
+    fn test_failed_refit_resets_fitted_state() {
+        // A successful fit followed by a failed re-fit (zero period) must
+        // leave the encoder un-fitted: transform must return NotFitted.
+        let vals = Column::from(Series::new("hour".into(), &[0.0_f64, 6.0]));
+        let df = DataFrame::new(2, vec![vals]).unwrap();
+        let mut enc = CyclicalEncoder::new(&["hour"], 24);
+
+        enc.fit(df.clone()).unwrap();
+        assert!(enc.transform(df.clone()).is_ok());
+
+        let bad = CyclicalEncoder::new(&["hour"], 0);
+        enc.columns = bad.columns;
+        let err = enc.fit(df.clone()).unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidInput(ref msg) if msg.contains("period must be >= 1")),
+            "Expected Error::InvalidInput containing 'period must be >= 1', got: {:?}",
+            err
+        );
+        assert!(matches!(enc.transform(df), Err(Error::NotFitted(_))));
     }
 }
