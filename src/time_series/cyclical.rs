@@ -13,9 +13,9 @@ use polars::prelude::*;
 /// `cos(2π * x / period)`, preserving the cyclic relationship.
 ///
 /// Periods are validated at [`fit`](Fit::fit) time: every period must be
-/// finite and `>= 1`; otherwise `fit` returns [`Error::InvalidInput`] whose
-/// message contains `period must be >= 1`. A zero (or non-positive) period
-/// would divide by zero and silently emit `NaN`/`±Inf` encodings.
+/// `>= 1`; otherwise `fit` returns [`Error::InvalidInput`] whose message
+/// contains `period must be >= 1`. A zero period would divide by zero and
+/// silently emit `NaN`/`±Inf` encodings.
 ///
 /// # Example
 ///
@@ -41,6 +41,8 @@ pub struct CyclicalEncoder {
 impl CyclicalEncoder {
     /// Create an encoder that maps each column to `(sin, cos)` using a single
     /// shared integer period (e.g. `24` for hours, `12` for months).
+    ///
+    /// Periods below 1 are rejected at `fit` time with [`Error::InvalidInput`].
     pub fn new(columns: &[&str], period: usize) -> Self {
         let period_f = period as f64;
         Self {
@@ -96,7 +98,7 @@ impl Fit<DataFrame> for CyclicalEncoder {
             }
         }
         for (col, period) in &self.columns {
-            if !period.is_finite() || *period < 1.0 {
+            if *period < 1.0 {
                 return Err(Error::InvalidInput(format!(
                     "CyclicalEncoder: period must be >= 1 (got {period} for column '{col}')."
                 )));
