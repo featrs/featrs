@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `CyclicalEncoder.fit` now rejects periods below 1 with
+  `Error::InvalidInput` instead of silently emitting `NaN`/`±Inf`
+  sin/cos encodings (`two_pi * v / 0.0`). Period `1` remains valid,
+  and fit no longer leaves stale fitted state after a failed re-fit (#149).
 - `LeaveOneOutEncoder.transform` no longer silently returns full-sample target
   means when the transform frame is not the exact training frame (a row subset,
   new rows, or a different column set), which leaked each row's own target into
