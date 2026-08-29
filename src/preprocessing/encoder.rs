@@ -10,7 +10,7 @@
 
 use crate::traits::{Error, Fit, Result, Transform};
 use polars::prelude::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 fn column_unique_strings(col: &Column) -> Result<Vec<String>> {
     let s = col.as_materialized_series();
@@ -37,7 +37,9 @@ fn column_unique_strings(col: &Column) -> Result<Vec<String>> {
 /// Encode categorical features as a one-hot numeric array.
 ///
 /// Creates a binary column for each category value. Non-string columns
-/// are ignored.
+/// are ignored. Output columns are named `{col}_{category}`; a generated
+/// name that collides with an input column or another generated column is
+/// rejected at fit with [`Error::InvalidInput`].
 ///
 /// # Example
 ///
@@ -64,6 +66,24 @@ pub struct OneHotEncoder {
 struct OneHotCategory {
     column: String,
     categories: Vec<String>,
+}
+
+/// The planned `(column, category)` one-hot pairs, in output order, honoring
+/// `drop_first`.
+///
+/// This is the single source of truth for what `transform` emits: both the
+/// fit-time name-collision guard and the transform loop derive their planned
+/// columns from it, so they can never drift apart.
+fn planned_pairs(cats: &[OneHotCategory], drop_first: bool) -> Vec<(String, String)> {
+    let start = if drop_first { 1 } else { 0 };
+    cats.iter()
+        .flat_map(|cat| {
+            cat.categories
+                .iter()
+                .skip(start)
+                .map(move |category| (cat.column.clone(), category.clone()))
+        })
+        .collect()
 }
 
 impl OneHotEncoder {
@@ -130,6 +150,26 @@ impl Fit<DataFrame> for OneHotEncoder {
             ));
         }
 
+        // Reject name collisions up front: `transform` emits `{col}_{category}`
+        // for every fitted category, and a generated name equal to an input
+        // column (or another generated name) would silently overwrite data.
+        // Mirror the plan `transform` will produce so the two can never drift.
+        let mut seen: HashSet<String> = x
+            .get_column_names()
+            .iter()
+            .map(|n| n.as_str().to_string())
+            .collect();
+        for (col, category) in planned_pairs(&cats, self.drop_first) {
+            let out_name = format!("{col}_{category}");
+            if !seen.insert(out_name.clone()) {
+                return Err(Error::InvalidInput(format!(
+                    "OneHotEncoder: generated column '{out_name}' collides with an \
+                     existing input column or another generated column. Rename the \
+                     conflicting input column."
+                )));
+            }
+        }
+
         self.categories = Some(cats);
         self.fitted = true;
         Ok(())
@@ -157,12 +197,12 @@ impl Transform<DataFrame> for OneHotEncoder {
         let mut new_cols: Vec<Column> = Vec::new();
         let n_rows = x.height();
 
-        for cat in cats {
-            let s = x.column(&cat.column).map_err(|e| {
+        for (col, category) in &planned_pairs(cats, self.drop_first) {
+            let s = x.column(col).map_err(|e| {
                 Error::InvalidInput(format!(
                     "OneHotEncoder.transform: column '{}' not found in input. \
                      The encoder was fitted on columns: {:?}. {}",
-                    cat.column,
+                    col,
                     cats.iter().map(|c| &c.column).collect::<Vec<_>>(),
                     e
                 ))
@@ -170,25 +210,22 @@ impl Transform<DataFrame> for OneHotEncoder {
             let ca = s.as_materialized_series().str().map_err(|e| {
                 Error::InvalidInput(format!(
                     "OneHotEncoder.transform: column '{}' has dtype {}; expected String. {}",
-                    cat.column,
+                    col,
                     s.dtype(),
                     e
                 ))
             })?;
-            let start_idx = if self.drop_first { 1 } else { 0 };
 
-            for (_j, category) in cat.categories.iter().enumerate().skip(start_idx) {
-                let mut vals = vec![0.0f64; n_rows];
-                for (i, opt) in ca.iter().enumerate() {
-                    if let Some(v) = opt
-                        && v == *category
-                    {
-                        vals[i] = 1.0;
-                    }
+            let mut vals = vec![0.0f64; n_rows];
+            for (i, opt) in ca.iter().enumerate() {
+                if let Some(v) = opt
+                    && v == *category
+                {
+                    vals[i] = 1.0;
                 }
-                let col_name = format!("{}_{}", cat.column, category);
-                new_cols.push(Column::from(Series::new(col_name.as_str().into(), &vals)));
             }
+            let col_name = format!("{col}_{category}");
+            new_cols.push(Column::from(Series::new(col_name.as_str().into(), &vals)));
         }
 
         DataFrame::new(n_rows, new_cols).map_err(|e| Error::Computation(e.to_string()))
@@ -1100,6 +1137,53 @@ mod tests {
         let result = enc.transform(df).unwrap();
 
         assert_eq!(result.width(), 4);
+    }
+
+    #[test]
+    fn test_one_hot_name_collision_errors() {
+        // Column "a" (category "b_c") and column "a_b" (category "c") both
+        // generate the output name "a_b_c"; fit must reject the ambiguity.
+        let a = Column::from(Series::new("a".into(), &["b_c", "x"]));
+        let a_b = Column::from(Series::new("a_b".into(), &["c", "y"]));
+        let df = DataFrame::new(2, vec![a, a_b]).unwrap();
+
+        let mut enc = OneHotEncoder::new();
+        let err = enc.fit(df).unwrap_err();
+        match err {
+            Error::InvalidInput(msg) => assert!(msg.contains("a_b_c"), "got: {msg}"),
+            other => panic!("expected Error::InvalidInput, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_one_hot_generated_vs_input_collision_errors() {
+        // Column "a" (category "b") generates "a_b", which shadows the real
+        // input column "a_b"; fit must reject it.
+        let a = Column::from(Series::new("a".into(), &["b", "c"]));
+        let a_b = Column::from(Series::new("a_b".into(), &["z", "z"]));
+        let df = DataFrame::new(2, vec![a, a_b]).unwrap();
+
+        let mut enc = OneHotEncoder::new();
+        let err = enc.fit(df).unwrap_err();
+        match err {
+            Error::InvalidInput(msg) => assert!(msg.contains("a_b"), "got: {msg}"),
+            other => panic!("expected Error::InvalidInput, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_one_hot_drop_first_skips_colliding_category() {
+        // With drop_first, "a"'s first category "b" (which would generate
+        // "a_b", shadowing the input column "a_b") is dropped, so fit succeeds.
+        let a = Column::from(Series::new("a".into(), &["b", "c"]));
+        let a_b = Column::from(Series::new("a_b".into(), &["z", "w"]));
+        let df = DataFrame::new(2, vec![a, a_b]).unwrap();
+
+        let mut enc = OneHotEncoder::new().drop_first(true);
+        enc.fit(df.clone()).unwrap();
+        let result = enc.transform(df).unwrap();
+        // "a" emits "a_c"; "a_b" emits "a_b_w".
+        assert_eq!(result.width(), 2);
     }
 
     #[test]
