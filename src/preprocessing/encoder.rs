@@ -120,6 +120,10 @@ impl Fit<DataFrame> for OneHotEncoder {
     type Output = ();
 
     fn fit(&mut self, x: DataFrame) -> Result<()> {
+        // Reset state first so a failed fit (including the collision guard
+        // below) cannot leave a stale output plan usable by a later transform.
+        self.fitted = false;
+        self.categories = None;
         if x.height() == 0 {
             return Err(Error::InvalidInput(
                 "OneHotEncoder.fit received a DataFrame with 0 rows. \
@@ -1184,6 +1188,34 @@ mod tests {
         let result = enc.transform(df).unwrap();
         // "a" emits "a_c"; "a_b" emits "a_b_w".
         assert_eq!(result.width(), 2);
+    }
+
+    #[test]
+    fn test_one_hot_failed_refit_clears_state() {
+        // Fit successfully, then re-fit on colliding data. The failed re-fit
+        // must clear the plan so a later transform returns NotFitted rather
+        // than reusing the stale output plan.
+        let ok =
+            DataFrame::new(2, vec![Column::from(Series::new("a".into(), &["b", "x"]))]).unwrap();
+        let mut enc = OneHotEncoder::new();
+        enc.fit(ok.clone()).unwrap();
+
+        let bad = DataFrame::new(
+            2,
+            vec![
+                Column::from(Series::new("a".into(), &["b_c", "x"])),
+                Column::from(Series::new("a_b".into(), &["c", "y"])),
+            ],
+        )
+        .unwrap();
+        let err = enc.fit(bad).unwrap_err();
+        assert!(matches!(err, Error::InvalidInput(_)));
+
+        let err2 = enc.transform(ok).unwrap_err();
+        assert!(
+            matches!(err2, Error::NotFitted(_)),
+            "failed re-fit must clear the output plan"
+        );
     }
 
     #[test]
