@@ -2,6 +2,10 @@
 //!
 //! [`VarianceThreshold`] removes features whose variance does not meet
 //! a threshold, i.e. features that are constant or nearly constant.
+//!
+//! Variance is computed over finite values only. Columns with no finite
+//! values (e.g. all-`NaN` or all-`±Inf`) are dropped from selection, matching
+//! the crate-wide finite-values-only convention used by the scalers.
 
 use crate::traits::{Error, Fit, Result, Transform};
 use polars::prelude::*;
@@ -10,6 +14,11 @@ use polars::prelude::*;
 ///
 /// Features with variance below `threshold` are removed. By default (threshold `0.0`),
 /// only constant features are removed.
+///
+/// Variance is computed over finite values only; `±Inf` and `NaN` values do not
+/// contribute to the mean/variance. A column with no finite values is dropped
+/// from the selection (it cannot have a meaningful finite variance). This matches
+/// the finite-values-only convention the crate uses elsewhere.
 ///
 /// Only `Float64` columns are considered; columns of other dtypes are silently
 /// dropped from the output.
@@ -96,7 +105,7 @@ impl Fit<DataFrame> for VarianceThreshold {
                     e
                 ))
             })?;
-            let vals: Vec<f64> = ca.iter().flatten().filter(|v| !v.is_nan()).collect();
+            let vals: Vec<f64> = ca.iter().flatten().filter(|v| v.is_finite()).collect();
             if vals.is_empty() {
                 continue;
             }
@@ -199,5 +208,51 @@ mod tests {
 
         assert_eq!(result.width(), 1);
         assert_eq!(result.get_column_names()[0].as_str(), "a");
+    }
+
+    #[test]
+    fn test_variance_threshold_inf_not_counted() {
+        // Column 'inf_const' has finite values all equal to 1.0 plus one +Inf.
+        // Column 'inf_high' has finite values with genuinely high variance plus
+        // one +Inf. Under the finite-values-only policy the variance of a column
+        // is computed over its finite values only, so:
+        //   - 'inf_const' finite variance is 0.0  -> dropped at a positive threshold
+        //   - 'inf_high'  finite variance is 20.0 -> retained
+        // A `+Inf` present in a column must not inflate (or turn into NaN) the
+        // variance of either column.
+        let inf_const = Column::from(Series::new(
+            "inf_const".into(),
+            &[1.0f64, 1.0, 1.0, 1.0, f64::INFINITY],
+        ));
+        let inf_high = Column::from(Series::new(
+            "inf_high".into(),
+            &[1.0f64, 5.0, 9.0, 13.0, f64::INFINITY],
+        ));
+        let df = DataFrame::new(5, vec![inf_const, inf_high]).unwrap();
+
+        let mut vt = VarianceThreshold::new(0.5);
+        vt.fit(df.clone()).unwrap();
+        let result = vt.transform(df).unwrap();
+
+        assert_eq!(result.width(), 1);
+        assert_eq!(result.get_column_names()[0].as_str(), "inf_high");
+    }
+
+    #[test]
+    fn test_variance_threshold_all_nonfinite_skipped() {
+        // All-Inf / all-NaN columns have no finite values and are silently
+        // skipped during fitting (no panic); a healthy finite column is still
+        // selected.
+        let inf_only = Column::from(Series::new("inf_only".into(), &[f64::INFINITY; 4]));
+        let nan_only = Column::from(Series::new("nan_only".into(), &[f64::NAN; 4]));
+        let good = Column::from(Series::new("good".into(), &[1.0f64, 5.0, 9.0, 13.0]));
+        let df = DataFrame::new(4, vec![inf_only, nan_only, good]).unwrap();
+
+        let mut vt = VarianceThreshold::new(0.5);
+        vt.fit(df.clone()).unwrap();
+        let result = vt.transform(df).unwrap();
+
+        assert_eq!(result.width(), 1);
+        assert_eq!(result.get_column_names()[0].as_str(), "good");
     }
 }
