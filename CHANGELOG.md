@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `OneHotEncoder.fit` now rejects generated output names that collide with an
+  existing input column or another generated one-hot column (e.g. column `a`
+  with category `b_c` and column `a_b` with category `c` both producing
+  `a_b_c`), returning `Error::InvalidInput` instead of silently overwriting
+  or mis-naming columns (#138).
 - `CyclicalEncoder.fit` now rejects periods below 1 with
   `Error::InvalidInput` instead of silently emitting `NaN`/`±Inf`
   sin/cos encodings (`two_pi * v / 0.0`). Period `1` remains valid,
