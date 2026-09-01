@@ -24,6 +24,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the training features. It now returns `Error::InvalidInput` in that case, and
   a new explicit `transform_unseen` method applies the full-sample per-category
   means for genuinely new data (#135).
+- `VarianceThreshold.fit` now computes each column's variance over finite
+  values only, excluding `±Inf`. Previously a column containing a single `±Inf`
+  produced a non-finite (NaN/Inf) variance, so its mean and variance were
+  meaningless regardless of the finite values; such columns are now selected
+  (or dropped) purely on the variance of their finite values, and columns with
+  no finite values are skipped, matching the finite-values-only convention used
+  by the scalers (#148).
 
 ## [0.4.0] - 2026-08-25
 
