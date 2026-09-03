@@ -16,7 +16,8 @@ use std::collections::HashMap;
 ///
 /// For every String column of the feature data, each row's category is
 /// replaced by the mean of the target over the **other** training rows that
-/// belong to that category:
+/// belong to that category. For a row whose OWN target is usable (non-null
+/// and finite), that value is excluded from the statistic:
 ///
 /// ```text
 /// loo = (category_sum - y_i) / (category_n - 1)
@@ -28,7 +29,17 @@ use std::collections::HashMap;
 /// loo = ((category_sum - y_i) + alpha * global_mean) / ((category_n - 1) + alpha)
 /// ```
 ///
-/// In both formulas `category_sum` and `category_n` count only *usable*
+/// A row whose own target is null or non-finite never contributed to
+/// `category_sum`/`category_n` in the first place (such rows are skipped when
+/// the category statistics are accumulated), so there is no own value to
+/// subtract and the denominator is not decremented. Its leave-one-out set is
+/// exactly the `category_n` **other** usable rows and the smoothed encoding is:
+///
+/// ```text
+/// loo = (category_sum + alpha * global_mean) / (category_n + alpha)
+/// ```
+///
+/// In every formula `category_sum` and `category_n` count only *usable*
 /// target rows (non-null and finite) within the row's category.
 ///
 /// Because the row's own target is excluded from its own statistic, LOO
@@ -751,6 +762,86 @@ mod tests {
         assert_relative_eq!(vals[0], 0.5, epsilon = 1e-12);
         assert_relative_eq!(vals[1], 1.0, epsilon = 1e-12);
         assert_relative_eq!(vals[2], 0.5, epsilon = 1e-12);
+    }
+
+    #[test]
+    fn test_null_target_row_matches_documented_denominator() {
+        // A category ("a") mixing usable and null targets, plus a second
+        // category, so the global mean differs from category "a"'s mean.
+        let cat = Column::from(Series::new("cat".into(), &["a", "a", "a", "b", "b"]));
+        let x = DataFrame::new(5, vec![cat]).unwrap();
+        let target = Column::from(Series::new(
+            "y".into(),
+            &[Some(1.0f64), None, Some(2.0), Some(5.0), Some(5.0)],
+        ));
+        let y = DataFrame::new(5, vec![target]).unwrap();
+
+        let mut enc = LeaveOneOutEncoder::new().alpha(2.0);
+        enc.fit(x.clone(), y).unwrap();
+        let result = enc.transform(x).unwrap();
+
+        let vals: Vec<f64> = result
+            .column("cat")
+            .unwrap()
+            .f64()
+            .unwrap()
+            .iter()
+            .flatten()
+            .collect();
+        // "a": usable {1, 2} -> sum=3, n=2, category_mean=1.5.
+        // "b": usable {5, 5} -> sum=10, n=2, category_mean=5.0.
+        // global_mean = (1+2+5+5)/4 = 3.25. alpha = 2.0.
+        // row1 (cat "a", null target): never counted in category "a", so the
+        //   LOO set is the n=2 OTHER usable rows and the smoothed denominator
+        //   is (n + alpha) = 4, NOT (n - 1 + alpha) = 3:
+        //   (category_sum + alpha * global_mean) / (n + alpha)
+        //   = (3 + 2*3.25) / 4 = 9.5/4 = 19/8 = 2.375.
+        assert_relative_eq!(vals[1], 19.0 / 8.0, epsilon = 1e-12);
+        // The usable-target rows still follow the classic (n-1+alpha) form.
+        // row0: ((3-1) + 2*3.25) / (1+2) = 8.5/3 = 17/6.
+        assert_relative_eq!(vals[0], 17.0 / 6.0, epsilon = 1e-12);
+        // row2: ((3-2) + 2*3.25) / (1+2) = 7.5/3 = 2.5.
+        assert_relative_eq!(vals[2], 2.5, epsilon = 1e-12);
+        // rows 3,4: ((10-5) + 2*3.25) / (1+2) = 11.5/3 = 23/6.
+        assert_relative_eq!(vals[3], 23.0 / 6.0, epsilon = 1e-12);
+        assert_relative_eq!(vals[4], 23.0 / 6.0, epsilon = 1e-12);
+    }
+
+    #[test]
+    fn test_all_null_target_category() {
+        // Category "q" has a null target on every row, so it has no usable
+        // target rows at all. Such a category must fall back to the global
+        // mean (its denominator would be 0) without panicking.
+        let cat = Column::from(Series::new("cat".into(), &["a", "a", "q", "q", "b"]));
+        let x = DataFrame::new(5, vec![cat]).unwrap();
+        let target = Column::from(Series::new(
+            "y".into(),
+            &[Some(1.0f64), Some(3.0), None, None, Some(8.0)],
+        ));
+        let y = DataFrame::new(5, vec![target]).unwrap();
+
+        let mut enc = LeaveOneOutEncoder::new().alpha(1.0);
+        enc.fit(x.clone(), y).unwrap();
+        let result = enc.transform(x).unwrap();
+
+        let vals: Vec<f64> = result
+            .column("cat")
+            .unwrap()
+            .f64()
+            .unwrap()
+            .iter()
+            .flatten()
+            .collect();
+        // global = (1+3+8)/3 = 4.0. "a": sum=4 n=2 mean=2.0; "b": sum=8 n=1 mean=8.0.
+        // rows 2,3 ("q", null target): n=0 -> global-mean fallback (no panic).
+        assert_relative_eq!(vals[2], 4.0, epsilon = 1e-12);
+        assert_relative_eq!(vals[3], 4.0, epsilon = 1e-12);
+        // row0 ("a", target 1): ((4-1) + 1*4) / (1+1) = 7/2 = 3.5.
+        assert_relative_eq!(vals[0], 3.5, epsilon = 1e-12);
+        // row1 ("a", target 3): ((4-3) + 1*4) / (1+1) = 5/2 = 2.5.
+        assert_relative_eq!(vals[1], 2.5, epsilon = 1e-12);
+        // row4 ("b", singleton): n-1 = 0 -> global-mean fallback.
+        assert_relative_eq!(vals[4], 4.0, epsilon = 1e-12);
     }
 
     #[test]

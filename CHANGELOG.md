@@ -31,6 +31,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (or dropped) purely on the variance of their finite values, and columns with
   no finite values are skipped, matching the finite-values-only convention used
   by the scalers (#148).
+- `LeaveOneOutEncoder` documentation now states the smoothing denominator for
+  every row class. Rows whose own target is null or non-finite never contribute
+  to their category's statistics, so their leave-one-out set is the `category_n`
+  other usable rows and the smoothed denominator is `category_n + alpha`; the
+  `category_n - 1 + alpha` form applies only when the row's own target is
+  excluded. New tests pin the encoded values against the formula; the encoded
+  values themselves are unchanged (#136).
 
 ## [0.4.0] - 2026-08-25
 
