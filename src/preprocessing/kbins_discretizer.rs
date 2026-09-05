@@ -7,6 +7,13 @@
 //! integer column ([`EncodeMode::Ordinal`]) or as one-hot binary columns
 //! ([`EncodeMode::OneHot`] / [`EncodeMode::OneHotDropFirst`]). This is the Rust
 //! analogue of `sklearn.preprocessing.KBinsDiscretizer`.
+//!
+//! The effective number of bins for a column can be **less** than the
+//! configured `n_bins`: duplicate bin boundaries (from heavily-tied quantile
+//! data, collapsed k-means centers, or a constant column) collapse, so the
+//! one-hot output width may be smaller than configured. Use
+//! [`KBinsDiscretizer::effective_bins`] to read the actual count per fitted
+//! column rather than sizing by `n_bins`.
 
 use crate::preprocessing::scaler::percentile_sorted;
 use crate::traits::{Error, Fit, Result, Transform};
@@ -33,9 +40,18 @@ pub enum EncodeMode {
     Ordinal,
     /// Replace the column with `n_bins` binary columns named
     /// `{column}_bin_{j}` for `j in 0..n_bins`.
+    ///
+    /// When duplicate bin boundaries collapse the effective bin count may be
+    /// **less** than `n_bins` (see [`KBinsDiscretizer::effective_bins`]), so
+    /// the number of emitted columns may be smaller than configured.
     OneHot,
     /// Like [`EncodeMode::OneHot`] but the first bin column (`j == 0`) is
     /// dropped, producing `n_bins - 1` columns to avoid multicollinearity.
+    ///
+    /// As with [`EncodeMode::OneHot`], when duplicate boundaries collapse the
+    /// effective bin count (and thus the column count) may be **less** than
+    /// `n_bins`; a column that collapses to a single bin is rejected at fit
+    /// time because dropping its only bin would remove the feature entirely.
     OneHotDropFirst,
 }
 
@@ -59,6 +75,13 @@ struct BinEdges {
 /// and non-finite inputs (`NaN`/`±Inf`) are emitted as `NaN`; in one-hot
 /// modes (`OneHot` / `OneHotDropFirst`) both `null` and non-finite inputs
 /// produce all-zero bin columns.
+///
+/// The effective number of bins for a column can be **less** than the
+/// configured `n_bins` when duplicate bin boundaries collapse (heavily-tied
+/// quantile data, collapsed k-means centers, or a constant column). This
+/// makes the one-hot output width smaller than configured, so downstream
+/// consumers should read [`effective_bins`](Self::effective_bins) per fitted
+/// column rather than sizing inputs by `n_bins`.
 ///
 /// # Example
 ///
@@ -122,6 +145,27 @@ impl KBinsDiscretizer {
         self.encode = e;
         self
     }
+
+    /// Number of effective bins produced for a fitted discretized column.
+    ///
+    /// This is `edges.len() - 1` for the column. When duplicate bin
+    /// boundaries collapse (e.g. heavily-tied quantile data or collapsed
+    /// k-means centers), the effective count can be **less** than the
+    /// configured `n_bins`. The one-hot output width is `effective_bins` for
+    /// [`EncodeMode::OneHot`] and `effective_bins - 1` for
+    /// [`EncodeMode::OneHotDropFirst`] (the first bin is dropped).
+    ///
+    /// Returns `Some(n)` for a column that was discretized at fit time, and
+    /// `None` for a column that was not discretized (non-`Float64` or not
+    /// present in the fitted data) or if the transformer has not been fitted
+    /// yet. Consumers that size inputs by `n_bins` should use this instead.
+    pub fn effective_bins(&self, column: &str) -> Option<usize> {
+        self.bin_edges
+            .as_ref()?
+            .iter()
+            .find(|b| b.column == column)
+            .map(|b| b.edges.len() - 1)
+    }
 }
 
 impl Default for KBinsDiscretizer {
@@ -145,14 +189,22 @@ fn bin_index(edges: &[f64], v: f64) -> usize {
 ///
 /// `edges[i] = min + (max - min) * i / k`. For a constant column
 /// (`min == max`) every edge equals `min`, which yields a single effective
-/// bin.
+/// bin. The endpoints are pinned to the exact observed `min`/`max`: without
+/// it `min + (max - min) * k / k` can round off `max` (e.g. `min=3.0`,
+/// `max=6.7`, `k=3` yields `6.700000000000001`), breaking the
+/// inclusive-last-bin contract documented on [`BinEdges`].
 fn uniform_edges(sorted: &[f64], k: usize) -> Vec<f64> {
     let min = sorted[0];
     let max = sorted[sorted.len() - 1];
     let span = max - min;
-    (0..=k)
+    let mut edges: Vec<f64> = (0..=k)
         .map(|i| min + span * (i as f64) / (k as f64))
-        .collect()
+        .collect();
+    // Pin the endpoints so the last edge is exactly the observed maximum
+    // (`span * k / k` does not always round back to `span`).
+    edges[0] = min;
+    edges[k] = max;
+    edges
 }
 
 /// Build equal-population bin edges over sorted `values`.
@@ -717,5 +769,62 @@ mod tests {
         for w in edges.windows(2) {
             assert!(w[0] <= w[1]);
         }
+    }
+
+    #[test]
+    fn test_uniform_max_falls_in_last_bin() {
+        // The documented inclusive-last-bin contract: the observed maximum maps
+        // to the LAST bin (index n_bins-1), and the final edge is exactly the
+        // observed max. The [3.0, 6.7] span is adversarial — `span * k / k` does
+        // not round back to `span` for several k (e.g. k=3 yields
+        // 6.700000000000001), so without pinning the final edge drifts off the
+        // max and the contract is broken even though `bin_index` clamps the
+        // value into the last bin.
+        for k in 2..=50usize {
+            let mut vals: Vec<f64> = (0..=k).map(|i| 3.0 + 3.7 * i as f64 / k as f64).collect();
+            vals[k] = 6.7; // observed maximum, pinned explicitly
+            vals.sort_by(|a, b| a.total_cmp(b));
+
+            let edges = uniform_edges(&vals, k);
+            assert_eq!(edges[0], vals[0]);
+            assert_eq!(edges[k], vals[k]); // final edge == observed max exactly
+
+            let df = make_df(&vals);
+            let mut kb = KBinsDiscretizer::new()
+                .n_bins(k)
+                .strategy(BinStrategy::Uniform)
+                .encode(EncodeMode::Ordinal);
+            kb.fit(df.clone()).unwrap();
+            let out = kb.transform(df).unwrap();
+            let col = out.column("x").unwrap().f64().unwrap();
+            let last = col.get(col.len() - 1).unwrap();
+            assert_relative_eq!(last, (k - 1) as f64); // max -> last bin
+        }
+    }
+
+    #[test]
+    fn test_quantile_effective_bins_exposed() {
+        // Heavily-tied quantile data: duplicate boundaries collapse, so the
+        // effective bin count (2) is LESS than the configured n_bins (3), and
+        // the one-hot output width matches the effective count, not n_bins.
+        let df = make_df(&[0.0, 0.0, 0.0, 0.0, 1.0, 2.0]);
+        let mut kb = KBinsDiscretizer::new()
+            .n_bins(3)
+            .strategy(BinStrategy::Quantile)
+            .encode(EncodeMode::OneHot);
+        kb.fit(df.clone()).unwrap();
+        assert_eq!(kb.effective_bins("x"), Some(2));
+
+        let out = kb.transform(df).unwrap();
+        assert_eq!(out.width(), 2); // one-hot width == effective bins
+
+        // Unknown / non-discretized column -> None.
+        assert_eq!(kb.effective_bins("nonexistent"), None);
+    }
+
+    #[test]
+    fn test_effective_bins_none_before_fit() {
+        let kb = KBinsDiscretizer::new().n_bins(3);
+        assert_eq!(kb.effective_bins("x"), None);
     }
 }

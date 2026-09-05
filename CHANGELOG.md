@@ -38,6 +38,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `category_n - 1 + alpha` form applies only when the row's own target is
   excluded. New tests pin the encoded values against the formula; the encoded
   values themselves are unchanged (#136).
+- `KBinsDiscretizer` uniform bin edges are now pinned to the exact observed
+  minimum and maximum. Previously `min + (max - min) * k / k` could round off
+  the maximum (e.g. `min=3.0`, `max=6.7`, `k=3` produced a final edge of
+  `6.700000000000001`), violating the documented inclusive-last-bin contract.
+  The effective bin count per column is now exposed via
+  `KBinsDiscretizer::effective_bins`, and the docs state that when duplicate
+  boundaries collapse the one-hot output width may be smaller than the
+  configured `n_bins` (#140).
 
 ## [0.4.0] - 2026-08-25
 
