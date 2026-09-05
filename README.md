@@ -212,7 +212,8 @@ Work is tracked in [GitHub milestones](https://github.com/featrs/featrs/mileston
 
 | Milestone | Focus | Target |
 |---|---|---|
-| [v0.4.0](https://github.com/featrs/featrs/milestone/1) | New transformers: scalers, encoders, cleaners | Sep 2026 |
+| [v0.4.0](https://github.com/featrs/featrs/milestone/1) | New transformers: scalers, encoders, cleaners | Released (Aug 2026) |
+| [v0.4.1](https://github.com/featrs/featrs/milestone/7) | Correctness fixes for encoders, discretizers, and variance | Released (Sep 2026) |
 | [v0.5.0](https://github.com/featrs/featrs/milestone/2) | Text, time-series, feature selection | Oct 2026 |
 | [v0.6.0](https://github.com/featrs/featrs/milestone/3) | Pipeline composition & automation (FeatureUnion, AutoPipeline, SchemaValidator) | Nov 2026 |
 | [v0.7.0](https://github.com/featrs/featrs/milestone/4) | Performance workstream (benchmarks, Polars-native kernels, rayon, ahash) + LazyFrame & streaming | Dec 2026 |

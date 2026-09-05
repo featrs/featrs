@@ -5,10 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.4.1] - 2026-09-05
 
 ### Fixed
 
+- `KBinsDiscretizer` uniform binning now pins the first and last edges to the
+  observed minimum and maximum, so the final edge is exactly the observed max
+  instead of drifting (e.g. `min=3.0, max=6.7, k=3` previously produced a last
+  edge of `6.700000000000001`), preserving the inclusive-last-bin contract.
+  Quantile/k-means bin-count shrink from duplicate boundaries is no longer
+  silent: a new `effective_bins()` method reports the actual bin count for a
+  fitted column, and the docs state the one-hot output width may be less than
+  `n_bins` (#140).
 - `OneHotEncoder.fit` now rejects generated output names that collide with an
   existing input column or another generated one-hot column (e.g. column `a`
   with category `b_c` and column `a_b` with category `c` both producing
@@ -394,7 +402,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Pipeline primitives: `Pipeline`, `ColumnTransformer` with `Remainder`.
 - Comprehensive API docs, module docs, and contributing guide.
 
-[Unreleased]: https://github.com/featrs/featrs/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/featrs/featrs/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/featrs/featrs/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/featrs/featrs/compare/v0.3.7...v0.4.0
 [0.3.7]: https://github.com/featrs/featrs/compare/v0.3.6...v0.3.7
 [0.3.6]: https://github.com/featrs/featrs/compare/v0.3.5...v0.3.6
