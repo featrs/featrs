@@ -106,6 +106,9 @@ pub mod prelude {
     pub use crate::preprocessing::winsorizer::Winsorizer;
     pub use crate::time_series::cyclical::CyclicalEncoder;
     pub use crate::time_series::diff::Difference;
+    pub use crate::time_series::ewma::{
+        EWMASmoothing, EWMAStatistic, ExponentiallyWeightedMovingAverage,
+    };
     pub use crate::time_series::expanding::ExpandingAggregator;
     pub use crate::time_series::lag::Lagger;
     pub use crate::time_series::rolling::RollingAggregator;

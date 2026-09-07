@@ -5,6 +5,7 @@
 
 pub mod cyclical;
 pub mod diff;
+pub mod ewma;
 pub mod expanding;
 pub mod lag;
 pub mod rolling;
