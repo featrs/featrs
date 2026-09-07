@@ -364,6 +364,17 @@ impl Transform<DataFrame> for ExponentiallyWeightedMovingAverage {
                 "ExponentiallyWeightedMovingAverage".into(),
             ));
         }
+        // Reject generated names that collide with the transform input so
+        // `with_column` never silently overwrites a caller-provided column.
+        for col in &self.columns {
+            let name = self.output_name(col);
+            if x.column(name.as_str()).is_ok() {
+                return Err(Error::InvalidInput(format!(
+                    "EWMA.transform: generated output name '{}' collides with an existing input column.",
+                    name
+                )));
+            }
+        }
         let mut out = x.clone();
 
         for col in &self.columns {
@@ -670,6 +681,25 @@ mod tests {
         let df = DataFrame::new(2, vec![a, b]).unwrap();
         let mut e = ExponentiallyWeightedMovingAverage::new(&["x"], EWMASmoothing::Alpha(0.5));
         let err = e.fit(df).unwrap_err();
+        assert!(matches!(err, Error::InvalidInput(_)));
+    }
+
+    #[test]
+    fn test_transform_time_collision_errors() {
+        // The fit input has only "x", so fit succeeds. But the transform input
+        // also carries a column named like the generated output; transform must
+        // reject it rather than silently overwrite the caller's column.
+        let fit_df = make_df(&[1.0, 2.0, 3.0]);
+        let mut e = ExponentiallyWeightedMovingAverage::new(&["x"], EWMASmoothing::Alpha(0.5));
+        e.fit(fit_df).unwrap();
+
+        let a = Column::from(Series::new("x".into(), &[1.0_f64, 2.0, 3.0]));
+        let b = Column::from(Series::new(
+            "x_ewm_mean_0.5".into(),
+            &[10.0_f64, 20.0, 30.0],
+        ));
+        let df = DataFrame::new(3, vec![a, b]).unwrap();
+        let err = e.transform(df).unwrap_err();
         assert!(matches!(err, Error::InvalidInput(_)));
     }
 
