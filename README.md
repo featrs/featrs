@@ -58,6 +58,7 @@ let scaled = scaler.transform(data)?;
 | | `Lagger` | Create lag features for time-series forecasting |
 | | `RollingAggregator` | Rolling window mean, std, min, max, sum |
 | | `ExpandingAggregator` | Expanding (cumulative) window mean, sum, min, max, std |
+| | `ExponentiallyWeightedMovingAverage` | EWMA mean, variance, and std with exponential decay |
 | | `Difference` | Differencing (`x[t] - x[t-1]`) and percentage change |
 | | `DatetimeFeatures` | Extract year/month/weekday/quarter/… components from date columns |
 | **Pipeline** | `Pipeline` | Sequentially chain multiple transformers |

@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `ExponentiallyWeightedMovingAverage` in `src/time_series/ewma.rs` computes
+  exponentially weighted moving average mean, variance, and standard deviation
+  over a time series. Supports `alpha`, `span`, `com`, and `half_life`
+  smoothing, plus the pandas-style `adjust`, `min_periods`, and `ignore_na`
+  options (#63).
+
 ## [0.4.1] - 2026-09-05
 
 ### Fixed
