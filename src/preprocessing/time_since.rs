@@ -13,10 +13,11 @@ use crate::traits::{Error, Fit, Result, Transform};
 use polars::prelude::TimeUnit as PolarsTimeUnit;
 use polars::prelude::*;
 
-/// Number of microseconds in one day.
+/// Number of microseconds in one day (used to floor a fixed reference to the
+/// containing day for `Date` columns).
 const MICROS_PER_DAY_I64: i64 = 86_400_000_000;
-/// Number of microseconds in one day, as a float for duration conversion.
-const MICROS_PER_DAY: f64 = 86_400_000_000.0;
+/// Number of nanoseconds in one day, as a float for duration conversion.
+const NANOS_PER_DAY: f64 = 86_400_000_000_000.0;
 
 /// The unit in which elapsed time is expressed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -83,8 +84,10 @@ pub enum ReferenceTime {
 enum ReferenceValue {
     /// Days since the Unix epoch (`Date` columns).
     Days(i64),
-    /// Microseconds since the Unix epoch (`Datetime` columns).
-    Micros(i64),
+    /// Nanoseconds since the Unix epoch (`Datetime` columns). Nanoseconds are
+    /// the finest polars time unit, so a learned reference round-trips exactly
+    /// for `Nanoseconds`, `Microseconds`, and `Milliseconds` columns.
+    Nanos(i64),
 }
 
 /// Compute the elapsed time from a reference timestamp for date/datetime columns.
@@ -182,18 +185,21 @@ impl TimeSince {
     /// returns [`Error::InvalidInput`].
     pub fn columns(mut self, cols: &[&str]) -> Self {
         self.column_config = Some(cols.iter().map(|s| s.to_string()).collect());
+        self.fitted = false;
         self
     }
 
     /// Set the unit in which elapsed time is expressed (default: [`TimeUnit::Days`]).
     pub fn unit(mut self, unit: TimeUnit) -> Self {
         self.unit = unit;
+        self.fitted = false;
         self
     }
 
     /// Set the reference instant (default: [`ReferenceTime::Min`]).
     pub fn reference(mut self, reference: ReferenceTime) -> Self {
         self.reference = reference;
+        self.fitted = false;
         self
     }
 }
@@ -215,30 +221,30 @@ fn dedup_preserve_order<T: Clone + Eq + std::hash::Hash>(items: &[T]) -> Vec<T> 
     items.iter().filter(|i| seen.insert(*i)).cloned().collect()
 }
 
-/// Microseconds in one native time unit of a `Datetime` column.
-fn micros_per_native_unit(tu: PolarsTimeUnit) -> f64 {
+/// Nanoseconds in one native time unit of a `Datetime` column.
+fn nanos_per_native_unit(tu: PolarsTimeUnit) -> f64 {
     match tu {
-        PolarsTimeUnit::Nanoseconds => 0.001,
-        PolarsTimeUnit::Microseconds => 1.0,
-        PolarsTimeUnit::Milliseconds => 1_000.0,
+        PolarsTimeUnit::Nanoseconds => 1.0,
+        PolarsTimeUnit::Microseconds => 1_000.0,
+        PolarsTimeUnit::Milliseconds => 1_000_000.0,
     }
 }
 
-/// Convert a native `Datetime` value to microseconds since the Unix epoch.
-fn native_to_micros(native: i64, tu: PolarsTimeUnit) -> i64 {
+/// Convert a native `Datetime` value to nanoseconds since the Unix epoch.
+fn native_to_nanos(native: i64, tu: PolarsTimeUnit) -> i64 {
     match tu {
-        PolarsTimeUnit::Nanoseconds => native.div_euclid(1_000),
-        PolarsTimeUnit::Microseconds => native,
-        PolarsTimeUnit::Milliseconds => native * 1_000,
+        PolarsTimeUnit::Nanoseconds => native,
+        PolarsTimeUnit::Microseconds => native * 1_000,
+        PolarsTimeUnit::Milliseconds => native * 1_000_000,
     }
 }
 
-/// Convert microseconds since the Unix epoch to a native `Datetime` value.
-fn micros_to_native(micros: i64, tu: PolarsTimeUnit) -> i64 {
+/// Convert nanoseconds since the Unix epoch to a native `Datetime` value.
+fn nanos_to_native(nanos: i64, tu: PolarsTimeUnit) -> i64 {
     match tu {
-        PolarsTimeUnit::Nanoseconds => micros * 1_000,
-        PolarsTimeUnit::Microseconds => micros,
-        PolarsTimeUnit::Milliseconds => micros.div_euclid(1_000),
+        PolarsTimeUnit::Nanoseconds => nanos,
+        PolarsTimeUnit::Microseconds => nanos.div_euclid(1_000),
+        PolarsTimeUnit::Milliseconds => nanos.div_euclid(1_000_000),
     }
 }
 
@@ -264,22 +270,22 @@ fn learn_reference(s: &Series, reference: ReferenceTime, col: &str) -> Result<Re
             Ok(ReferenceValue::Days(days))
         }
         DataType::Datetime(tu, _) => {
-            let micros = match reference {
-                ReferenceTime::Fixed(epoch_us) => epoch_us,
+            let nanos = match reference {
+                ReferenceTime::Fixed(epoch_us) => epoch_us * 1_000,
                 ReferenceTime::Min => {
                     let v = s.to_physical_repr().min::<i64>().map_err(|e| {
                         Error::Computation(format!("TimeSince.fit: column '{col}': {e}"))
                     })?;
-                    native_to_micros(v.ok_or_else(|| all_null_error(col, "Min"))?, *tu)
+                    native_to_nanos(v.ok_or_else(|| all_null_error(col, "Min"))?, *tu)
                 }
                 ReferenceTime::Max => {
                     let v = s.to_physical_repr().max::<i64>().map_err(|e| {
                         Error::Computation(format!("TimeSince.fit: column '{col}': {e}"))
                     })?;
-                    native_to_micros(v.ok_or_else(|| all_null_error(col, "Max"))?, *tu)
+                    native_to_nanos(v.ok_or_else(|| all_null_error(col, "Max"))?, *tu)
                 }
             };
-            Ok(ReferenceValue::Micros(micros))
+            Ok(ReferenceValue::Nanos(nanos))
         }
         other => Err(Error::InvalidInput(format!(
             "TimeSince.fit: column '{col}' has dtype {other}; expected Date or Datetime."
@@ -312,15 +318,18 @@ fn elapsed_series(
                 .map(|opt| opt.map(|v| unit.convert_days((v as i64 - *days) as f64)))
                 .collect()
         }
-        (DataType::Datetime(tu, _), ReferenceValue::Micros(micros)) => {
+        (DataType::Datetime(tu, _), ReferenceValue::Nanos(nanos)) => {
             let ca = s.to_physical_repr().i64().map_err(c_err)?.clone();
-            let ref_native = micros_to_native(*micros, *tu);
-            let micros_per_native = micros_per_native_unit(*tu);
+            let ref_native = nanos_to_native(*nanos, *tu);
+            let nanos_per_native = nanos_per_native_unit(*tu);
             ca.iter()
                 .map(|opt| {
                     opt.map(|v| {
-                        let delta_micros = (v - ref_native) as f64 * micros_per_native;
-                        unit.convert_days(delta_micros / MICROS_PER_DAY)
+                        // i128 keeps the subtraction exact even for extreme
+                        // i64 timestamps near their range limits.
+                        let delta_nanos =
+                            (i128::from(v) - i128::from(ref_native)) as f64 * nanos_per_native;
+                        unit.convert_days(delta_nanos / NANOS_PER_DAY)
                     })
                 })
                 .collect()
@@ -906,5 +915,75 @@ mod tests {
         // ...and must NOT leave the transformer in a fitted state
         let err = xf.transform(DataFrame::empty()).unwrap_err();
         assert!(matches!(err, Error::NotFitted(_)));
+    }
+
+    #[test]
+    fn test_nanosecond_reference_preserves_precision() {
+        // Sub-microsecond values: the learned Min/Max reference must round-trip
+        // exactly so the extreme row yields exactly 0.0 elapsed (no truncation
+        // to whole microseconds).
+        let col = Column::from(
+            Series::new("t".into(), &[Some(1_001i64), Some(2_002i64)])
+                .cast(&DataType::Datetime(PolarsTimeUnit::Nanoseconds, None))
+                .unwrap(),
+        );
+        let df = DataFrame::new(2, vec![col]).unwrap();
+
+        let mut min_xf = TimeSince::new()
+            .columns(&["t"])
+            .reference(ReferenceTime::Min)
+            .unit(TimeUnit::Days);
+        min_xf.fit(df.clone()).unwrap();
+        let min_days = min_xf
+            .transform(df.clone())
+            .unwrap()
+            .column("t_since_days")
+            .unwrap()
+            .f64()
+            .unwrap()
+            .clone();
+        assert_eq!(min_days.get(0), Some(0.0));
+
+        let mut max_xf = TimeSince::new()
+            .columns(&["t"])
+            .reference(ReferenceTime::Max)
+            .unit(TimeUnit::Days);
+        max_xf.fit(df.clone()).unwrap();
+        let max_days = max_xf
+            .transform(df)
+            .unwrap()
+            .column("t_since_days")
+            .unwrap()
+            .f64()
+            .unwrap()
+            .clone();
+        assert_eq!(max_days.get(1), Some(0.0));
+    }
+
+    #[test]
+    fn test_setter_after_fit_invalidates() {
+        let col = date_col("d", &[Some(DAY0), Some(DAY0 + 1)]);
+        let df = DataFrame::new(2, vec![col]).unwrap();
+
+        let mut xf = TimeSince::new().columns(&["d"]);
+        xf.fit(df.clone()).unwrap();
+        // Reconfiguring after fit must invalidate fitted state so transform
+        // cannot silently apply the previous configuration.
+        xf = xf.columns(&["d"]);
+        assert!(matches!(
+            xf.transform(df.clone()).unwrap_err(),
+            Error::NotFitted(_)
+        ));
+
+        xf.fit(df.clone()).unwrap();
+        xf = xf.unit(TimeUnit::Hours);
+        assert!(matches!(
+            xf.transform(df.clone()).unwrap_err(),
+            Error::NotFitted(_)
+        ));
+
+        xf.fit(df.clone()).unwrap();
+        xf = xf.reference(ReferenceTime::Max);
+        assert!(matches!(xf.transform(df).unwrap_err(), Error::NotFitted(_)));
     }
 }
