@@ -103,6 +103,7 @@ pub mod prelude {
     pub use crate::preprocessing::scaler::RobustScaler;
     pub use crate::preprocessing::scaler::StandardScaler;
     pub use crate::preprocessing::string_cleaner::{CaseStyle, StringCleaner, StringReplacement};
+    pub use crate::preprocessing::time_since::{ReferenceTime, TimeSince, TimeUnit};
     pub use crate::preprocessing::winsorizer::Winsorizer;
     pub use crate::time_series::cyclical::CyclicalEncoder;
     pub use crate::time_series::diff::Difference;
