@@ -46,16 +46,17 @@ impl TimeUnit {
         }
     }
 
-    /// Number of this unit per day ([`Days`](TimeUnit::Days) is `1.0`).
+    /// Convert a duration measured in days into this unit.
     ///
-    /// Used to convert a duration measured in days into the configured unit.
-    fn per_day(self) -> f64 {
+    /// [`Days`](TimeUnit::Days) returns the input unchanged; [`Weeks`](TimeUnit::Weeks)
+    /// divides by `7.0` so whole-week durations stay exact.
+    fn convert_days(self, delta_days: f64) -> f64 {
         match self {
-            TimeUnit::Seconds => 86_400.0,
-            TimeUnit::Minutes => 1_440.0,
-            TimeUnit::Hours => 24.0,
-            TimeUnit::Days => 1.0,
-            TimeUnit::Weeks => 1.0 / 7.0,
+            TimeUnit::Seconds => delta_days * 86_400.0,
+            TimeUnit::Minutes => delta_days * 1_440.0,
+            TimeUnit::Hours => delta_days * 24.0,
+            TimeUnit::Days => delta_days,
+            TimeUnit::Weeks => delta_days / 7.0,
         }
     }
 }
@@ -106,12 +107,13 @@ enum ReferenceValue {
 /// - **`Date` columns** carry whole-day resolution: a sub-day unit (`Hours`,
 ///   `Minutes`, `Seconds`) emits the whole-day multiple (e.g. `3` days →
 ///   `72.0` hours), never a time-of-day component. `Days`/`Weeks` are the
-///   meaningful units for `Date` columns.
+///   meaningful units for `Date` columns. A [`Fixed`](ReferenceTime::Fixed)
+///   reference with a sub-day offset is floored to the containing day.
 /// - **Timezone-aware datetimes** — elapsed time is computed from the
 ///   underlying epoch instants, so timezone metadata does not affect the
-///   result and no timezone-mismatch error is raised. The [`Fixed`]
-///   reference is interpreted as the same timezone-naive instant for every
-///   column.
+///   result and no timezone-mismatch error is raised. The
+///   [`Fixed`](ReferenceTime::Fixed) reference is interpreted as the same
+///   timezone-naive instant for every column.
 /// - **Auto-discovery** — when no columns are configured, all `Date` and
 ///   `Datetime` columns present at fit time are discovered (on *every* fit).
 /// - **Name collisions** — a generated name that matches an existing input
@@ -225,7 +227,7 @@ fn micros_per_native_unit(tu: PolarsTimeUnit) -> f64 {
 /// Convert a native `Datetime` value to microseconds since the Unix epoch.
 fn native_to_micros(native: i64, tu: PolarsTimeUnit) -> i64 {
     match tu {
-        PolarsTimeUnit::Nanoseconds => native / 1_000,
+        PolarsTimeUnit::Nanoseconds => native.div_euclid(1_000),
         PolarsTimeUnit::Microseconds => native,
         PolarsTimeUnit::Milliseconds => native * 1_000,
     }
@@ -236,7 +238,7 @@ fn micros_to_native(micros: i64, tu: PolarsTimeUnit) -> i64 {
     match tu {
         PolarsTimeUnit::Nanoseconds => micros * 1_000,
         PolarsTimeUnit::Microseconds => micros,
-        PolarsTimeUnit::Milliseconds => micros / 1_000,
+        PolarsTimeUnit::Milliseconds => micros.div_euclid(1_000),
     }
 }
 
@@ -302,13 +304,12 @@ fn elapsed_series(
 ) -> Result<Series> {
     let c_err =
         |e: PolarsError| Error::Computation(format!("TimeSince.transform: column '{col}': {e}"));
-    let factor = unit.per_day();
 
     let result: ChunkedArray<Float64Type> = match (s.dtype(), reference) {
         (DataType::Date, ReferenceValue::Days(days)) => {
             let ca = s.to_physical_repr().i32().map_err(c_err)?.clone();
             ca.iter()
-                .map(|opt| opt.map(|v| (v as i64 - *days) as f64 * factor))
+                .map(|opt| opt.map(|v| unit.convert_days((v as i64 - *days) as f64)))
                 .collect()
         }
         (DataType::Datetime(tu, _), ReferenceValue::Micros(micros)) => {
@@ -319,7 +320,7 @@ fn elapsed_series(
                 .map(|opt| {
                     opt.map(|v| {
                         let delta_micros = (v - ref_native) as f64 * micros_per_native;
-                        delta_micros / MICROS_PER_DAY * factor
+                        unit.convert_days(delta_micros / MICROS_PER_DAY)
                     })
                 })
                 .collect()
@@ -592,6 +593,112 @@ mod tests {
         assert_eq!(
             hours.column("t_since_hours").unwrap().f64().unwrap().get(1),
             Some(24.0)
+        );
+    }
+
+    #[test]
+    fn test_datetime_min_max_reference() {
+        // 2024 (leap year): Jan 1, Feb 1, Apr 1.
+        let col = datetime_col(
+            "t",
+            &[Some(T0), Some(T0 + 31 * DAY_US), Some(T0 + 91 * DAY_US)],
+        );
+        let df = DataFrame::new(3, vec![col]).unwrap();
+
+        let mut min_xf = TimeSince::new()
+            .columns(&["t"])
+            .reference(ReferenceTime::Min);
+        min_xf.fit(df.clone()).unwrap();
+        let min_out = min_xf.transform(df.clone()).unwrap();
+        let min_days = min_out.column("t_since_days").unwrap().f64().unwrap();
+        assert_eq!(min_days.get(0), Some(0.0));
+        assert_eq!(min_days.get(1), Some(31.0));
+        assert_eq!(min_days.get(2), Some(91.0));
+
+        let mut max_xf = TimeSince::new()
+            .columns(&["t"])
+            .reference(ReferenceTime::Max);
+        max_xf.fit(df.clone()).unwrap();
+        let max_out = max_xf.transform(df).unwrap();
+        let max_days = max_out.column("t_since_days").unwrap().f64().unwrap();
+        assert_eq!(max_days.get(0), Some(-91.0));
+        assert_eq!(max_days.get(1), Some(-60.0));
+        assert_eq!(max_days.get(2), Some(0.0));
+    }
+
+    #[test]
+    fn test_milliseconds_timeunit() {
+        // 2024-01-01 and 2024-02-01 in milliseconds.
+        let t0_ms = T0 / 1_000;
+        let col = Column::from(
+            Series::new("t".into(), &[Some(t0_ms), Some(t0_ms + 31 * 86_400_000)])
+                .cast(&DataType::Datetime(PolarsTimeUnit::Milliseconds, None))
+                .unwrap(),
+        );
+        let df = DataFrame::new(2, vec![col]).unwrap();
+
+        let mut xf = TimeSince::new()
+            .columns(&["t"])
+            .reference(ReferenceTime::Fixed(T0))
+            .unit(TimeUnit::Days);
+        xf.fit(df.clone()).unwrap();
+        let out = xf.transform(df).unwrap();
+
+        let days = out.column("t_since_days").unwrap().f64().unwrap();
+        assert_eq!(days.get(0), Some(0.0));
+        assert_eq!(days.get(1), Some(31.0));
+    }
+
+    #[test]
+    fn test_remaining_unit_conversions() {
+        // Whole-week boundaries for exact Weeks output.
+        let col = date_col("d", &[Some(DAY0), Some(DAY0 + 7), Some(DAY0 + 14)]);
+        let df = DataFrame::new(3, vec![col]).unwrap();
+        let fixed = ReferenceTime::Fixed(DAY0 as i64 * MICROS_PER_DAY_I64);
+
+        let mut weeks_xf = TimeSince::new()
+            .columns(&["d"])
+            .reference(fixed)
+            .unit(TimeUnit::Weeks);
+        weeks_xf.fit(df.clone()).unwrap();
+        let weeks = weeks_xf.transform(df.clone()).unwrap();
+        let w = weeks.column("d_since_weeks").unwrap().f64().unwrap();
+        assert_eq!(w.get(0), Some(0.0));
+        assert_eq!(w.get(1), Some(1.0));
+        assert_eq!(w.get(2), Some(2.0));
+
+        // 1 day -> 1440 minutes and 86_400 seconds.
+        let col1 = date_col("d", &[Some(DAY0), Some(DAY0 + 1)]);
+        let df1 = DataFrame::new(2, vec![col1]).unwrap();
+
+        let mut mins_xf = TimeSince::new()
+            .columns(&["d"])
+            .reference(fixed)
+            .unit(TimeUnit::Minutes);
+        mins_xf.fit(df1.clone()).unwrap();
+        let mins = mins_xf.transform(df1.clone()).unwrap();
+        assert_eq!(
+            mins.column("d_since_minutes")
+                .unwrap()
+                .f64()
+                .unwrap()
+                .get(1),
+            Some(1440.0)
+        );
+
+        let mut secs_xf = TimeSince::new()
+            .columns(&["d"])
+            .reference(fixed)
+            .unit(TimeUnit::Seconds);
+        secs_xf.fit(df1.clone()).unwrap();
+        let secs = secs_xf.transform(df1).unwrap();
+        assert_eq!(
+            secs.column("d_since_seconds")
+                .unwrap()
+                .f64()
+                .unwrap()
+                .get(1),
+            Some(86_400.0)
         );
     }
 
