@@ -14,6 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   over a time series. Supports `alpha`, `span`, `com`, and `half_life`
   smoothing, plus the pandas-style `adjust`, `min_periods`, and `ignore_na`
   options (#63).
+- `TimeSince` in `src/preprocessing/time_since.rs` computes the signed elapsed
+  time from a reference timestamp for `Date`/`Datetime` columns, emitted as a
+  `Float64` `{column}_since_{unit}` column. The reference is a fixed
+  microsecond-since-epoch instant, or the per-column min/max learned at fit;
+  the unit is configurable (seconds through weeks) (#61).
 
 ## [0.4.1] - 2026-09-05
 

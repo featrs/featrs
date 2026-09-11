@@ -61,6 +61,7 @@ let scaled = scaler.transform(data)?;
 | | `ExponentiallyWeightedMovingAverage` | EWMA mean, variance, and std with exponential decay |
 | | `Difference` | Differencing (`x[t] - x[t-1]`) and percentage change |
 | | `DatetimeFeatures` | Extract year/month/weekday/quarter/… components from date columns |
+| | `TimeSince` | Elapsed time from a reference timestamp (`{column}_since_{unit}`) in seconds…weeks |
 | **Pipeline** | `Pipeline` | Sequentially chain multiple transformers |
 | | `ColumnTransformer` | Apply different transformers to different columns |
 | **Selection** | `VarianceThreshold` | Remove low-variance features |
