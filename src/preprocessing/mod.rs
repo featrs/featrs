@@ -29,5 +29,6 @@ pub mod rare_category_grouper;
 pub mod ratio_features;
 pub mod scaler;
 pub mod string_cleaner;
+pub mod text;
 pub mod time_since;
 pub mod winsorizer;

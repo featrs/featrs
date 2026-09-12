@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `CharacterNGramVectorizer` in `src/preprocessing/text/char_ngram_vectorizer.rs`
+  vectorizes a `String` column into character-level n-gram term counts, with a
+  `CharOnly` analyzer and a `CharWb` analyzer that keeps n-grams inside word
+  boundaries. Term selection is configurable via `ngram_range`, `min_df`,
+  `max_df` and `max_features`, with deterministic (frequency, then
+  alphabetical) vocabulary ordering (#78).
 - `ExponentiallyWeightedMovingAverage` in `src/time_series/ewma.rs` computes
   exponentially weighted moving average mean, variance, and standard deviation
   over a time series. Supports `alpha`, `span`, `com`, and `half_life`

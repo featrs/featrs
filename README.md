@@ -62,6 +62,7 @@ let scaled = scaler.transform(data)?;
 | | `Difference` | Differencing (`x[t] - x[t-1]`) and percentage change |
 | | `DatetimeFeatures` | Extract year/month/weekday/quarter/… components from date columns |
 | | `TimeSince` | Elapsed time from a reference timestamp (`{column}_since_{unit}`) in seconds…weeks |
+| **Text** | `CharacterNGramVectorizer` | Character n-gram term-count features (char, or char-within-word-boundary) |
 | **Pipeline** | `Pipeline` | Sequentially chain multiple transformers |
 | | `ColumnTransformer` | Apply different transformers to different columns |
 | **Selection** | `VarianceThreshold` | Remove low-variance features |
