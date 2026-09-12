@@ -36,10 +36,21 @@ pub enum Analyzer {
 /// alphabetically, so the emitted column order is deterministic across runs.
 /// `min_df == 0` and `max_features(0)` are rejected at fit time.
 ///
+/// `char`-level runs of whitespace are collapsed to a single space under
+/// [`Analyzer::CharOnly`], as scikit-learn's `char` analyzer does, so `"a␣␣b"`
+/// and `"a␣b"` produce the same n-grams. Under [`Analyzer::CharWb`] a word
+/// shorter than the lower bound of `ngram_range` produces no n-grams at all
+/// (scikit-learn instead emits the padded word once); this keeps the guarantee
+/// that every generated term is exactly as long as its n, and matches the
+/// "text shorter than the minimum n yields an all-zero row" contract.
+///
 /// The vocabulary — and therefore the output width — grows quickly with the
-/// upper bound of `ngram_range`: the number of n-grams of a document is roughly
-/// `len * n` for a range up to `n`. Cap it with `max_features` when using wide
-/// ranges, since the output is one `Float64` column per term.
+/// upper bound of `ngram_range`: the number of distinct n-grams of a document
+/// grows roughly with the square of its length. N-grams are streamed into the
+/// counting map rather than collected per document first, but the vocabulary
+/// itself is still bounded only by the distinct substrings seen, so cap it with
+/// `max_features` when using wide ranges — the output is one `Float64` column
+/// per term.
 ///
 /// # Example
 ///
@@ -89,30 +100,35 @@ impl CharacterNGramVectorizer {
     /// Set the name of the `String` column to vectorize.
     pub fn column(mut self, c: &str) -> Self {
         self.column = Some(c.to_string());
+        self.reset();
         self
     }
 
     /// Set the analyzer (default [`Analyzer::CharOnly`]).
     pub fn analyzer(mut self, a: Analyzer) -> Self {
         self.analyzer = a;
+        self.reset();
         self
     }
 
     /// Set the inclusive n-gram length range (default `(2, 4)`).
     pub fn ngram_range(mut self, lo: usize, hi: usize) -> Self {
         self.ngram_range = (lo, hi);
+        self.reset();
         self
     }
 
-    /// Keep at most `n` terms, ranked by corpus frequency.
+    /// Keep at most `n` terms, ranked by corpus frequency (`n >= 1`).
     pub fn max_features(mut self, n: usize) -> Self {
         self.max_features = Some(n);
+        self.reset();
         self
     }
 
     /// Drop terms appearing in fewer than `n` documents (default `1`).
     pub fn min_df(mut self, n: usize) -> Self {
         self.min_df = n;
+        self.reset();
         self
     }
 
@@ -120,13 +136,26 @@ impl CharacterNGramVectorizer {
     /// (default `1.0`, i.e. no upper bound).
     pub fn max_df(mut self, p: f64) -> Self {
         self.max_df = p;
+        self.reset();
         self
     }
 
     /// Lowercase the text before extracting n-grams (default `true`).
     pub fn lowercase(mut self, b: bool) -> Self {
         self.lowercase = b;
+        self.reset();
         self
+    }
+
+    /// Discard the learned vocabulary.
+    ///
+    /// Every configuration change invalidates the vocabulary it was learned
+    /// from, so a setter called after `fit` cannot leave `transform` applying a
+    /// stale vocabulary to the new configuration.
+    fn reset(&mut self) {
+        self.fitted = false;
+        self.vocabulary = None;
+        self.terms.clear();
     }
 }
 
@@ -147,30 +176,61 @@ impl Default for CharacterNGramVectorizer {
     }
 }
 
-/// Push every character n-gram of length `lo..=hi` found in `chars` onto `out`.
-fn push_ngrams(chars: &[char], lo: usize, hi: usize, out: &mut Vec<String>) {
+/// Collapse each run of two or more whitespace characters into a single space.
+///
+/// This mirrors the whitespace normalization scikit-learn's `char` analyzer
+/// applies before slicing n-grams; a lone whitespace character is left as-is.
+/// `Analyzer::CharWb` needs no normalization because splitting on whitespace
+/// already discards the difference between one and several separators.
+fn collapse_whitespace_runs(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch.is_whitespace() && chars.peek().is_some_and(|next| next.is_whitespace()) {
+            out.push(' ');
+            while chars.peek().is_some_and(|next| next.is_whitespace()) {
+                chars.next();
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+/// Call `f` with every character n-gram of length `lo..=hi` found in `chars`.
+///
+/// N-grams are passed as slices so callers can count or look them up without
+/// materializing a `String` per occurrence.
+fn for_each_ngram(chars: &[char], lo: usize, hi: usize, mut f: impl FnMut(&[char])) {
     let len = chars.len();
     let hi = hi.min(len);
     // `lo..=hi` is empty when `lo > hi`, so short strings simply yield nothing.
     for n in lo..=hi {
         for start in 0..=(len - n) {
-            out.push(chars[start..start + n].iter().collect());
+            f(&chars[start..start + n]);
         }
     }
 }
 
-/// Extract every character n-gram of length `lo..=hi` from `text`.
+/// Feed every character n-gram of length `lo..=hi` in `text` to `f`.
 ///
 /// `Analyzer::CharOnly` walks the whole string; `Analyzer::CharWb` pads each
 /// whitespace-separated word with a space on both sides and analyzes the words
-/// independently. Both paths are Unicode-aware: n-grams are built from
-/// `char` values (Unicode scalar values), never from UTF-8 bytes.
-fn char_ngrams(text: &str, analyzer: Analyzer, lo: usize, hi: usize) -> Vec<String> {
-    let mut out = Vec::new();
+/// independently, so no n-gram spans two words. Both paths are Unicode-aware:
+/// n-grams are built from `char` scalar values, never from UTF-8 bytes.
+fn for_each_ngram_in_text(
+    text: &str,
+    analyzer: Analyzer,
+    lo: usize,
+    hi: usize,
+    mut f: impl FnMut(&[char]),
+) {
     match analyzer {
         Analyzer::CharOnly => {
-            let chars: Vec<char> = text.chars().collect();
-            push_ngrams(&chars, lo, hi, &mut out);
+            let normalized = collapse_whitespace_runs(text);
+            let chars: Vec<char> = normalized.chars().collect();
+            for_each_ngram(&chars, lo, hi, f);
         }
         Analyzer::CharWb => {
             for word in text.split_whitespace() {
@@ -178,20 +238,18 @@ fn char_ngrams(text: &str, analyzer: Analyzer, lo: usize, hi: usize) -> Vec<Stri
                 padded.push(' ');
                 padded.extend(word.chars());
                 padded.push(' ');
-                push_ngrams(&padded, lo, hi, &mut out);
+                for_each_ngram(&padded, lo, hi, &mut f);
             }
         }
     }
-    out
 }
 
 impl Fit<DataFrame> for CharacterNGramVectorizer {
     type Output = ();
 
     fn fit(&mut self, x: DataFrame) -> Result<()> {
-        self.fitted = false;
-        self.vocabulary = None;
-        self.terms.clear();
+        // Reset state first so a failed re-fit cannot leave stale state.
+        self.reset();
 
         if x.width() == 0 || x.height() == 0 {
             return Err(Error::InvalidInput(
@@ -252,8 +310,8 @@ impl Fit<DataFrame> for CharacterNGramVectorizer {
         }
 
         let n_docs = x.height() as f64;
-        let mut doc_freq: HashMap<String, u64> = HashMap::new();
-        let mut total_freq: HashMap<String, u64> = HashMap::new();
+        let mut doc_freq: HashMap<Vec<char>, u64> = HashMap::new();
+        let mut total_freq: HashMap<Vec<char>, u64> = HashMap::new();
         for doc in ca.iter() {
             let Some(doc) = doc else { continue };
             let text = if self.lowercase {
@@ -261,17 +319,22 @@ impl Fit<DataFrame> for CharacterNGramVectorizer {
             } else {
                 doc.to_string()
             };
-            let mut counts: HashMap<String, u64> = HashMap::new();
-            for gram in char_ngrams(&text, self.analyzer, lo, hi) {
-                *counts.entry(gram).or_insert(0) += 1;
-            }
+            let mut counts: HashMap<Vec<char>, u64> = HashMap::new();
+            for_each_ngram_in_text(&text, self.analyzer, lo, hi, |gram| {
+                match counts.get_mut(gram) {
+                    Some(count) => *count += 1,
+                    None => {
+                        counts.insert(gram.to_vec(), 1);
+                    }
+                }
+            });
             for (gram, count) in counts {
                 *total_freq.entry(gram.clone()).or_insert(0) += count;
                 *doc_freq.entry(gram).or_insert(0) += 1;
             }
         }
 
-        let mut kept: Vec<(String, u64)> = doc_freq
+        let mut kept: Vec<(Vec<char>, u64)> = doc_freq
             .into_iter()
             .filter(|(_, freq)| *freq >= self.min_df as u64 && *freq as f64 / n_docs <= self.max_df)
             .map(|(gram, _)| {
@@ -287,8 +350,9 @@ impl Fit<DataFrame> for CharacterNGramVectorizer {
 
         let mut vocabulary = HashMap::with_capacity(kept.len());
         for (idx, (gram, _)) in kept.into_iter().enumerate() {
-            vocabulary.insert(gram.clone(), idx as u32);
-            self.terms.push(gram);
+            let term: String = gram.iter().collect();
+            vocabulary.insert(term.clone(), idx as u32);
+            self.terms.push(term);
         }
         self.vocabulary = Some(vocabulary);
         self.fitted = true;
@@ -340,6 +404,12 @@ impl Transform<DataFrame> for CharacterNGramVectorizer {
 
         let n_rows = x.height();
         let (lo, hi) = self.ngram_range;
+        // Look terms up by character slice so counting allocates nothing per
+        // occurrence (only once per vocabulary entry, here).
+        let lookup: HashMap<Vec<char>, u32> = vocabulary
+            .iter()
+            .map(|(term, idx)| (term.chars().collect(), *idx))
+            .collect();
         let mut counts = vec![vec![0.0f64; n_rows]; self.terms.len()];
         for (row, doc) in ca.iter().enumerate() {
             let Some(doc) = doc else { continue };
@@ -348,11 +418,11 @@ impl Transform<DataFrame> for CharacterNGramVectorizer {
             } else {
                 doc.to_string()
             };
-            for gram in char_ngrams(&text, self.analyzer, lo, hi) {
-                if let Some(idx) = vocabulary.get(gram.as_str()) {
+            for_each_ngram_in_text(&text, self.analyzer, lo, hi, |gram| {
+                if let Some(idx) = lookup.get(gram) {
                     counts[*idx as usize][row] += 1.0;
                 }
-            }
+            });
         }
 
         let out_cols: Vec<Column> = self
@@ -827,5 +897,66 @@ mod tests {
             DataFrame::new(1, vec![Column::from(Series::new("text".into(), &[1i32]))]).unwrap();
         let err = v.transform(numeric).unwrap_err();
         assert!(err.to_string().contains("expected String"), "{err}");
+    }
+
+    /// `CharOnly` collapses runs of whitespace into one space, so repeated
+    /// separators do not add terms; a lone whitespace character is kept as-is.
+    #[test]
+    fn test_char_only_collapses_whitespace_runs() {
+        let mut v = CharacterNGramVectorizer::new()
+            .column("text")
+            .ngram_range(2, 3);
+        v.fit(make_df(&["a  b"])).unwrap();
+        let out = v.transform(make_df(&["a  b"])).unwrap();
+        let names: Vec<&str> = out.get_column_names().iter().map(|n| n.as_str()).collect();
+        assert_eq!(names, vec![" b", "a ", "a b"]);
+        assert_eq!(column_sum(&out, "a "), 1.0);
+
+        // A run of any whitespace characters collapses the same way.
+        let out = v.transform(make_df(&["a\t\nb"])).unwrap();
+        let names: Vec<&str> = out.get_column_names().iter().map(|n| n.as_str()).collect();
+        assert_eq!(names, vec![" b", "a ", "a b"]);
+
+        // A single whitespace character is not a run and is preserved.
+        let mut single = CharacterNGramVectorizer::new()
+            .column("text")
+            .ngram_range(2, 2);
+        single.fit(make_df(&["a\tb"])).unwrap();
+        let out = single.transform(make_df(&["a\tb"])).unwrap();
+        assert_eq!(out.width(), 2);
+        assert_eq!(column_sum(&out, "a\t"), 1.0);
+    }
+
+    /// Under `CharWb` a word shorter than the lower n-gram bound contributes no
+    /// terms, so every emitted term has a length inside `ngram_range`.
+    #[test]
+    fn test_char_wb_short_word_yields_no_terms() {
+        let df = make_df(&["i am here"]);
+        let mut v = CharacterNGramVectorizer::new()
+            .column("text")
+            .analyzer(Analyzer::CharWb)
+            .ngram_range(5, 5);
+        v.fit(df.clone()).unwrap();
+        let out = v.transform(df).unwrap();
+
+        // " i " (3 chars) and " am " (4 chars) are too short for a 5-gram; only
+        // " here " (6 chars) is long enough: " here" and "here ".
+        let names: Vec<&str> = out.get_column_names().iter().map(|n| n.as_str()).collect();
+        assert_eq!(names, vec![" here", "here "]);
+    }
+
+    /// Changing any configuration invalidates the learned vocabulary.
+    #[test]
+    fn test_setter_invalidates_fitted_state() {
+        let df = make_df(&["hello"]);
+        let mut v = CharacterNGramVectorizer::new()
+            .column("text")
+            .ngram_range(2, 2);
+        v.fit(df.clone()).unwrap();
+        assert_eq!(v.transform(df.clone()).unwrap().width(), 4);
+
+        let v = v.ngram_range(2, 3);
+        let err = v.transform(df).unwrap_err().to_string();
+        assert!(err.contains("not fitted"), "{err}");
     }
 }
