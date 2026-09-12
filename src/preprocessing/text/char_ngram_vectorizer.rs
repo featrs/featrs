@@ -7,6 +7,7 @@
 
 use crate::traits::{Error, Fit, Result, Transform};
 use polars::prelude::*;
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 /// Which characters the n-grams are extracted from.
@@ -27,10 +28,14 @@ pub enum Analyzer {
 /// (`min_df`/`max_df` filter by document frequency, `max_features` then keeps
 /// the most frequent terms). `transform` counts, per document, how often each
 /// learned n-gram occurs and returns a new `DataFrame` with one `Float64`
-/// column per term, named after the n-gram itself; unknown n-grams are dropped.
-/// The input column is not carried over, so the output width equals the
-/// vocabulary size. A vocabulary that ends up empty is returned as a 0x0 frame
-/// (polars cannot represent columns-less frames with a row count).
+/// column per term, named after the n-gram itself — a term can be whitespace
+/// only, e.g. `" "` under `ngram_range(1, 1)`. Unknown n-grams are dropped. The
+/// input column is not carried over, so the output width equals the vocabulary
+/// size. A vocabulary that ends up empty is returned as a 0x0 frame (polars
+/// cannot represent columns-less frames with a row count), so a downstream
+/// pipeline step receives an empty frame rather than one row per document.
+/// `null` cells contribute no n-grams but still count as documents for the
+/// `min_df`/`max_df` denominators.
 ///
 /// Ties in the `max_features` ranking (equal corpus frequency) are broken
 /// alphabetically, so the emitted column order is deterministic across runs.
@@ -38,11 +43,13 @@ pub enum Analyzer {
 ///
 /// `char`-level runs of whitespace are collapsed to a single space under
 /// [`Analyzer::CharOnly`], as scikit-learn's `char` analyzer does, so `"a␣␣b"`
-/// and `"a␣b"` produce the same n-grams. Under [`Analyzer::CharWb`] a word
-/// shorter than the lower bound of `ngram_range` produces no n-grams at all
-/// (scikit-learn instead emits the padded word once); this keeps the guarantee
-/// that every generated term is exactly as long as its n, and matches the
-/// "text shorter than the minimum n yields an all-zero row" contract.
+/// and `"a␣b"` produce the same n-grams. Under [`Analyzer::CharWb`] a word whose
+/// padded length — its character count plus the two boundary spaces — is below
+/// the lower bound of `ngram_range` produces no n-grams at all (scikit-learn
+/// instead emits the padded word once); this keeps the guarantee that every
+/// generated term is exactly as long as its n, and matches the "text shorter
+/// than the minimum n yields an all-zero row" contract. Note that a one-word
+/// document is therefore measured with its two padding spaces.
 ///
 /// The vocabulary — and therefore the output width — grows quickly with the
 /// upper bound of `ngram_range`: the number of distinct n-grams of a document
@@ -310,14 +317,14 @@ impl Fit<DataFrame> for CharacterNGramVectorizer {
         }
 
         let n_docs = x.height() as f64;
-        let mut doc_freq: HashMap<Vec<char>, u64> = HashMap::new();
-        let mut total_freq: HashMap<Vec<char>, u64> = HashMap::new();
+        // One entry per distinct n-gram: (document frequency, total occurrences).
+        let mut stats: HashMap<Vec<char>, (u64, u64)> = HashMap::new();
         for doc in ca.iter() {
             let Some(doc) = doc else { continue };
-            let text = if self.lowercase {
-                doc.to_lowercase()
+            let text: Cow<str> = if self.lowercase {
+                Cow::Owned(doc.to_lowercase())
             } else {
-                doc.to_string()
+                Cow::Borrowed(doc)
             };
             let mut counts: HashMap<Vec<char>, u64> = HashMap::new();
             for_each_ngram_in_text(&text, self.analyzer, lo, hi, |gram| {
@@ -329,18 +336,18 @@ impl Fit<DataFrame> for CharacterNGramVectorizer {
                 }
             });
             for (gram, count) in counts {
-                *total_freq.entry(gram.clone()).or_insert(0) += count;
-                *doc_freq.entry(gram).or_insert(0) += 1;
+                let entry = stats.entry(gram).or_insert((0, 0));
+                entry.0 += 1;
+                entry.1 += count;
             }
         }
 
-        let mut kept: Vec<(Vec<char>, u64)> = doc_freq
+        let mut kept: Vec<(Vec<char>, u64)> = stats
             .into_iter()
-            .filter(|(_, freq)| *freq >= self.min_df as u64 && *freq as f64 / n_docs <= self.max_df)
-            .map(|(gram, _)| {
-                let count = total_freq.get(&gram).copied().unwrap_or(0);
-                (gram, count)
+            .filter(|(_, (doc_freq, _))| {
+                *doc_freq >= self.min_df as u64 && *doc_freq as f64 / n_docs <= self.max_df
             })
+            .map(|(gram, (_, total_freq))| (gram, total_freq))
             .collect();
         // Deterministic ranking: most frequent first, alphabetically on ties.
         kept.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
@@ -363,6 +370,12 @@ impl Fit<DataFrame> for CharacterNGramVectorizer {
 impl Transform<DataFrame> for CharacterNGramVectorizer {
     type Output = DataFrame;
 
+    /// Count the fitted vocabulary's n-grams per document.
+    ///
+    /// Returns a frame of `Float64` counts (one column per term, one row per
+    /// document). When the vocabulary is empty the result is a 0x0 frame, since
+    /// polars drops the height of a frame without columns — downstream steps
+    /// receive an empty frame rather than one row per document.
     fn transform(&self, x: DataFrame) -> Result<DataFrame> {
         let not_fitted = || {
             Error::NotFitted(
@@ -413,10 +426,10 @@ impl Transform<DataFrame> for CharacterNGramVectorizer {
         let mut counts = vec![vec![0.0f64; n_rows]; self.terms.len()];
         for (row, doc) in ca.iter().enumerate() {
             let Some(doc) = doc else { continue };
-            let text = if self.lowercase {
-                doc.to_lowercase()
+            let text: Cow<str> = if self.lowercase {
+                Cow::Owned(doc.to_lowercase())
             } else {
-                doc.to_string()
+                Cow::Borrowed(doc)
             };
             for_each_ngram_in_text(&text, self.analyzer, lo, hi, |gram| {
                 if let Some(idx) = lookup.get(gram) {
