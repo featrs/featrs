@@ -1,7 +1,8 @@
 //! Select top-k features using statistical tests.
 //!
-//! Provides [`SelectKBest`] and the [`FClassif`] scoring function
-//! (ANOVA F-value between each feature and the target).
+//! Provides [`SelectKBest`] and two scoring functions: [`FClassif`]
+//! (ANOVA F-value between each feature and a classification target) and
+//! [`FRegression`] (F-value for the linear relation to a continuous target).
 
 use crate::traits::{Error, FitSupervised, Result, Transform};
 use polars::prelude::*;
@@ -182,6 +183,133 @@ impl ScoreFunction for FClassif {
     }
 }
 
+/// F-value from regression scoring function.
+///
+/// Computes the F-statistic for the significance of the linear relationship
+/// between each feature and a continuous target:
+///
+/// ```text
+/// F = r² / (1 - r²) * (n - 2)
+/// ```
+///
+/// Where `r` is the Pearson correlation between the feature and the target and
+/// `n` is the number of usable observations. Higher F-values indicate a
+/// stronger linear relationship. A feature that is perfectly linearly related
+/// to the target scores positive infinity; a constant feature, a constant
+/// target, and any feature with fewer than three usable observations score
+/// zero. Rows with a null feature value or null target are excluded per column,
+/// and `n` is the number of remaining observations.
+///
+/// Requires the target column to be [`Float64`](DataType::Float64).
+pub struct FRegression;
+
+impl FRegression {
+    /// Create a new `FRegression` scorer.
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for FRegression {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ScoreFunction for FRegression {
+    fn score(&self, x: &DataFrame, y: &Column) -> Result<Vec<(String, f64)>> {
+        let y_ca = y.as_materialized_series().f64().map_err(|_| {
+            Error::InvalidInput(format!(
+                "FRegression: target column '{}' has dtype {}; expected Float64. \
+                     The target must be numeric (continuous) for the regression F-test.",
+                y.name(),
+                y.dtype()
+            ))
+        })?;
+        let y_vals: Vec<Option<f64>> = y_ca.iter().collect();
+
+        if y_vals.len() != x.height() {
+            return Err(Error::InvalidInput(format!(
+                "FRegression: feature rows ({}) and target rows ({}) don't match.",
+                x.height(),
+                y_vals.len()
+            )));
+        }
+
+        let mut scores = Vec::new();
+
+        for col in x.columns() {
+            let name = col.name().to_string();
+            if col.dtype() != &DataType::Float64 {
+                continue;
+            }
+            let ca = col.f64().map_err(|e| {
+                Error::InvalidInput(format!(
+                    "FRegression: column '{}' has dtype {}; expected Float64. {}",
+                    name,
+                    col.dtype(),
+                    e
+                ))
+            })?;
+            let observed: Vec<(f64, f64)> = ca
+                .iter()
+                .zip(&y_vals)
+                .filter_map(|(xv, &yv)| match (xv, yv) {
+                    (Some(value), Some(target)) => Some((value, target)),
+                    _ => None,
+                })
+                .collect();
+
+            let n = observed.len() as f64;
+            if n < 3.0 {
+                // Fewer than three usable rows leaves no degrees of freedom.
+                scores.push((name, 0.0));
+                continue;
+            }
+
+            let (feature_origin, target_origin) = observed[0];
+            let feature_mean_offset = observed
+                .iter()
+                .map(|(value, _)| value - feature_origin)
+                .sum::<f64>()
+                / n;
+            let target_mean_offset = observed
+                .iter()
+                .map(|(_, target)| target - target_origin)
+                .sum::<f64>()
+                / n;
+
+            let mut ss_feature = 0.0;
+            let mut ss_target = 0.0;
+            let mut ss_cross = 0.0;
+            for &(value, target) in &observed {
+                let feature_dev = (value - feature_origin) - feature_mean_offset;
+                let target_dev = (target - target_origin) - target_mean_offset;
+                ss_feature += feature_dev * feature_dev;
+                ss_target += target_dev * target_dev;
+                ss_cross += feature_dev * target_dev;
+            }
+
+            let f_stat = if ss_feature == 0.0 || ss_target == 0.0 {
+                // A constant feature or a constant target has no defined
+                // correlation, so there is no evidence of a linear relation.
+                0.0
+            } else {
+                let r_squared = (ss_cross * ss_cross) / (ss_feature * ss_target);
+                if r_squared >= 1.0 {
+                    f64::INFINITY
+                } else {
+                    r_squared / (1.0 - r_squared) * (n - 2.0)
+                }
+            };
+
+            scores.push((name, f_stat));
+        }
+
+        Ok(scores)
+    }
+}
+
 /// Select the top `k` features according to a [`ScoreFunction`].
 ///
 /// `SelectKBest` is supervised: it implements [`FitSupervised`] and requires a
@@ -322,6 +450,7 @@ impl Transform<DataFrame> for SelectKBest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use approx::assert_relative_eq;
 
     fn make_features() -> DataFrame {
         let a = Column::from(Series::new(
@@ -656,6 +785,166 @@ mod tests {
         assert!(
             err.to_string().contains("k must be greater than 0"),
             "error message should mention k"
+        );
+    }
+
+    fn f_regression_scores(feature: Column, target: Column) -> Vec<(String, f64)> {
+        let height = target.len();
+        let x = DataFrame::new(height, vec![feature]).unwrap();
+        FRegression::new().score(&x, &target).unwrap()
+    }
+
+    #[test]
+    fn test_f_regression_perfect_linear_relation_scores_infinity() {
+        let feature = Column::from(Series::new("linear".into(), &[0.0f64, 1.0, 2.0, 3.0, 4.0]));
+        let target = Column::from(Series::new("target".into(), &[0.0f64, 1.0, 2.0, 3.0, 4.0]));
+
+        let scores = f_regression_scores(feature, target);
+
+        assert_eq!(scores, vec![("linear".to_string(), f64::INFINITY)]);
+    }
+
+    #[test]
+    fn test_f_regression_known_f_value() {
+        // x = [0, 1, 2, 3], y = [0, 1, 1, 2] -> r² = 0.9, F = 0.9 / 0.1 * (4 - 2) = 18.
+        let feature = Column::from(Series::new("feature".into(), &[0.0f64, 1.0, 2.0, 3.0]));
+        let target = Column::from(Series::new("target".into(), &[0.0f64, 1.0, 1.0, 2.0]));
+
+        let scores = f_regression_scores(feature, target);
+
+        assert_eq!(scores[0].0, "feature");
+        assert_relative_eq!(scores[0].1, 18.0, epsilon = 1e-9);
+    }
+
+    #[test]
+    fn test_f_regression_fewer_than_three_rows_scores_zero() {
+        let feature = Column::from(Series::new(
+            "sparse".into(),
+            &[Some(1.0f64), None, Some(3.0)],
+        ));
+        let target = Column::from(Series::new("target".into(), &[1.0f64, 2.0, 3.0]));
+
+        let scores = f_regression_scores(feature, target);
+
+        assert_eq!(scores, vec![("sparse".to_string(), 0.0)]);
+    }
+
+    #[test]
+    fn test_f_regression_excludes_null_rows_pairwise() {
+        let feature = Column::from(Series::new(
+            "partial".into(),
+            &[Some(1.0f64), Some(2.0), None, Some(4.0), Some(5.0)],
+        ));
+        let target = Column::from(Series::new("target".into(), &[2.0f64, 4.0, 6.0, 8.0, 10.0]));
+
+        let scores = f_regression_scores(feature, target);
+
+        // The four usable rows are exactly linear.
+        assert_eq!(scores, vec![("partial".to_string(), f64::INFINITY)]);
+    }
+
+    #[test]
+    fn test_f_regression_excludes_null_target_rows() {
+        let feature = Column::from(Series::new("linear".into(), &[1.0f64, 2.0, 3.0, 4.0, 5.0]));
+        let target = Column::from(Series::new(
+            "target".into(),
+            &[Some(2.0f64), Some(4.0), None, Some(8.0), Some(10.0)],
+        ));
+
+        let scores = f_regression_scores(feature, target);
+
+        // The four rows where both values are present are exactly linear.
+        assert_eq!(scores, vec![("linear".to_string(), f64::INFINITY)]);
+    }
+
+    #[test]
+    fn test_f_regression_three_rows_uses_one_degree_of_freedom() {
+        // x = [0, 1, 2], y = [0, 1, 1] -> r² = 3/4, F = 0.75 / 0.25 * (3 - 2) = 3.
+        let feature = Column::from(Series::new("feature".into(), &[0.0f64, 1.0, 2.0]));
+        let target = Column::from(Series::new("target".into(), &[0.0f64, 1.0, 1.0]));
+
+        let scores = f_regression_scores(feature, target);
+
+        assert_eq!(scores[0].0, "feature");
+        assert_relative_eq!(scores[0].1, 3.0, epsilon = 1e-9);
+    }
+
+    #[test]
+    fn test_f_regression_constant_feature_scores_zero() {
+        let feature = Column::from(Series::new("constant".into(), &[5.0f64; 4]));
+        let target = Column::from(Series::new("target".into(), &[0.0f64, 1.0, 1.0, 2.0]));
+
+        let scores = f_regression_scores(feature, target);
+
+        assert_eq!(scores, vec![("constant".to_string(), 0.0)]);
+    }
+
+    #[test]
+    fn test_f_regression_constant_target_scores_zero() {
+        let feature = Column::from(Series::new("feature".into(), &[0.0f64, 1.0, 2.0, 3.0]));
+        let target = Column::from(Series::new("target".into(), &[1.0f64; 4]));
+
+        let scores = f_regression_scores(feature, target);
+
+        assert_eq!(scores, vec![("feature".to_string(), 0.0)]);
+    }
+
+    #[test]
+    fn test_f_regression_requires_float64_target() {
+        let feature = Column::from(Series::new("feature".into(), &[0.0f64, 1.0, 2.0, 3.0]));
+        let target = Column::from(Series::new("target".into(), &[0i64, 1, 1, 2]));
+
+        let error = FRegression::new()
+            .score(&DataFrame::new(4, vec![feature]).unwrap(), &target)
+            .unwrap_err();
+
+        assert!(
+            error.to_string().contains("FRegression"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn test_f_regression_row_count_mismatch_errors() {
+        let feature = Column::from(Series::new("feature".into(), &[0.0f64, 1.0, 2.0]));
+        let target = Column::from(Series::new("target".into(), &[0.0f64, 1.0, 2.0, 3.0]));
+
+        let error = FRegression::new()
+            .score(&DataFrame::new(3, vec![feature]).unwrap(), &target)
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("feature rows (3) and target rows (4) don't match"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn test_select_kbest_f_regression_picks_correlated_feature() {
+        let linear = Column::from(Series::new(
+            "linear".into(),
+            &[0.0f64, 1.0, 2.0, 3.0, 4.0, 5.0],
+        ));
+        let noise = Column::from(Series::new(
+            "noise".into(),
+            &[5.0f64, 0.0, 5.0, 0.0, 5.0, 0.0],
+        ));
+        let features = DataFrame::new(6, vec![noise, linear]).unwrap();
+        let target = Column::from(Series::new(
+            "target".into(),
+            &[0.0f64, 1.0, 2.0, 3.0, 4.0, 5.0],
+        ));
+        let mut skb = SelectKBest::new(1, Box::new(FRegression::new()));
+
+        skb.fit(features.clone(), DataFrame::new(6, vec![target]).unwrap())
+            .unwrap();
+
+        assert_eq!(skb.scores().unwrap()[0].0, "linear");
+        assert_eq!(
+            skb.transform(features).unwrap().get_column_names(),
+            &["linear"]
         );
     }
 }
