@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `SelectPercentile` in `src/feature_selection/select_percentile.rs` ranks
+  features with a scoring function and keeps the top `percentile` percent of
+  them, rounding up to at least one feature. Ties break on column name and
+  `NaN` scores rank last. The new `FRegression` scorer in
+  `src/feature_selection/select_kbest.rs` scores each `Float64` feature against
+  a continuous target with the F-statistic derived from Pearson's `r` (#52).
 - `CharacterNGramVectorizer` in `src/preprocessing/text/char_ngram_vectorizer.rs`
   vectorizes a `String` column into character-level n-gram term counts, with a
   `CharOnly` analyzer and a `CharWb` analyzer that keeps n-grams inside word
