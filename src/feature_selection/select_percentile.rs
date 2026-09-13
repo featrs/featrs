@@ -128,6 +128,13 @@ impl FitSupervised<DataFrame, DataFrame> for SelectPercentile {
                 y.width()
             )));
         }
+        if y.height() != x.height() {
+            return Err(Error::InvalidInput(format!(
+                "SelectPercentile.fit: feature rows ({}) and target rows ({}) don't match.",
+                x.height(),
+                y.height()
+            )));
+        }
         let y_col = &y.columns()[0];
         let mut scores = self.score_fn.score(&x, y_col)?;
 
@@ -139,20 +146,15 @@ impl FitSupervised<DataFrame, DataFrame> for SelectPercentile {
             ));
         }
 
-        // Rank highest score first, `NaN` last, ties by column name ascending.
-        // `f64::total_cmp` orders `NaN` as the greatest value, so map it to
-        // `-inf` for ranking while keeping the raw score in `self.scores`.
-        let ranked = |score: f64| {
-            if score.is_nan() {
-                f64::NEG_INFINITY
-            } else {
-                score
-            }
-        };
-        scores.sort_by(|a, b| {
-            ranked(b.1)
-                .total_cmp(&ranked(a.1))
-                .then_with(|| a.0.cmp(&b.0))
+        // Rank highest score first with ties broken by column name ascending.
+        // `f64::total_cmp` orders `NaN` as the greatest value, so `NaN` is
+        // compared separately and always sorts after a real score, including
+        // `-inf`. The raw score is kept in `self.scores`.
+        scores.sort_by(|a, b| match (a.1.is_nan(), b.1.is_nan()) {
+            (true, true) => a.0.cmp(&b.0),
+            (true, false) => std::cmp::Ordering::Greater,
+            (false, true) => std::cmp::Ordering::Less,
+            (false, false) => b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)),
         });
 
         let n = scores.len();
@@ -373,6 +375,37 @@ mod tests {
         assert_eq!(scored_names(&sp), ["c_high", "b_low", "a_nan"]);
         // The stored scores keep the raw NaN, only the ranking maps it away.
         assert!(sp.scores().unwrap()[2].1.is_nan());
+    }
+
+    #[test]
+    fn test_nan_scores_rank_after_negative_infinity() {
+        let mut sp = fixed(vec![("a_nan", f64::NAN), ("z_neg_inf", f64::NEG_INFINITY)]);
+
+        sp.fit(make_features(), make_target()).unwrap();
+
+        assert_eq!(scored_names(&sp), ["z_neg_inf", "a_nan"]);
+    }
+
+    #[test]
+    fn test_mismatched_target_rows_are_rejected() {
+        let y = DataFrame::new(
+            4,
+            vec![Column::from(Series::new(
+                "target".into(),
+                &[0.0f64, 0.0, 1.0, 1.0],
+            ))],
+        )
+        .unwrap();
+        let mut sp = SelectPercentile::new();
+
+        let error = sp.fit(make_features(), y).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("SelectPercentile.fit: feature rows (6) and target rows (4) don't match"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]

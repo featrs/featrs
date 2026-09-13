@@ -10,6 +10,7 @@ pub mod select_percentile;
 pub mod variance_threshold;
 
 pub use correlation_threshold::CorrelationThreshold;
+pub use select_kbest::FRegression;
 pub use select_kbest::SelectKBest;
 pub use select_percentile::SelectPercentile;
 pub use variance_threshold::VarianceThreshold;
