@@ -8,5 +8,8 @@
 //!
 //! [`char_ngram_vectorizer::CharacterNGramVectorizer`] extracts overlapping
 //! character n-grams, which capture sub-word structure and are robust to typos.
+//! [`count_vectorizer::CountVectorizer`] counts whole words (or the n-grams of
+//! words) as a bag-of-words feature matrix.
 
 pub mod char_ngram_vectorizer;
+pub mod count_vectorizer;

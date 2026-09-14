@@ -21,6 +21,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   boundaries. Term selection is configurable via `ngram_range`, `min_df`,
   `max_df` and `max_features`, with deterministic (frequency, then
   alphabetical) vocabulary ordering (#78).
+- `CountVectorizer` in `src/preprocessing/text/count_vectorizer.rs` turns a
+  `String` column into a bag-of-words matrix: each row is a document, each
+  `Float64` column a learned term. Documents are tokenized on whitespace or
+  with a user-supplied `WordRegex`, lowercased and stop-word filtered before
+  `ngram_range` n-grams are formed. Term selection is configurable via
+  `min_df`, `max_df` and `max_features`, with a deterministic (frequency, then
+  alphabetical) vocabulary order (#76).
 - `ExponentiallyWeightedMovingAverage` in `src/time_series/ewma.rs` computes
   exponentially weighted moving average mean, variance, and standard deviation
   over a time series. Supports `alpha`, `span`, `com`, and `half_life`
