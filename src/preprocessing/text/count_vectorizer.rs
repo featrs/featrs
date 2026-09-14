@@ -28,7 +28,10 @@ pub enum Tokenizer {
     /// a capture group does not narrow it (use `find_iter`, not
     /// `captures_iter`, semantics); empty matches are skipped. Use this to keep
     /// punctuation out of the vocabulary (`\w+`), to restrict tokens to letters
-    /// (`[a-z]+`), or to split on a separator that is not whitespace.
+    /// (`[a-z]+`), or to pull tokens out of text that splitting on whitespace
+    /// cannot separate (e.g. `hi,there` under `\w+`). Note that the pattern
+    /// *selects* tokens rather than splitting on separators, so a separator
+    /// pattern would put the separators themselves into the vocabulary.
     WordRegex(String),
 }
 
@@ -766,8 +769,8 @@ mod tests {
         assert_eq!(v.transform(df).unwrap().width(), 0);
     }
 
-    /// `Tokenizer::WordRegex` splits wherever the pattern matches, instead of
-    /// on whitespace.
+    /// `Tokenizer::WordRegex` keeps each non-empty pattern match as a token,
+    /// instead of splitting on whitespace.
     #[test]
     fn test_word_regex_tokenizer() {
         let corpus = ["hi,there", "hi there"];
