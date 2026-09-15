@@ -109,6 +109,9 @@ pub mod prelude {
         Analyzer, CharacterNGramVectorizer,
     };
     pub use crate::preprocessing::text::count_vectorizer::{CountVectorizer, Tokenizer};
+    pub use crate::preprocessing::text::tfidf_vectorizer::{
+        IDFWeighting, NormMethod, TFIDFVectorizer, TfWeighting,
+    };
     pub use crate::preprocessing::time_since::{ReferenceTime, TimeSince, TimeUnit};
     pub use crate::preprocessing::winsorizer::Winsorizer;
     pub use crate::time_series::cyclical::CyclicalEncoder;

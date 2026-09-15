@@ -9,7 +9,11 @@
 //! [`char_ngram_vectorizer::CharacterNGramVectorizer`] extracts overlapping
 //! character n-grams, which capture sub-word structure and are robust to typos.
 //! [`count_vectorizer::CountVectorizer`] counts whole words (or the n-grams of
-//! words) as a bag-of-words feature matrix.
+//! words) as a bag-of-words feature matrix, and
+//! [`tfidf_vectorizer::TFIDFVectorizer`] reweights those counts by inverse
+//! document frequency so that terms occurring in many documents contribute
+//! less.
 
 pub mod char_ngram_vectorizer;
 pub mod count_vectorizer;
+pub mod tfidf_vectorizer;
