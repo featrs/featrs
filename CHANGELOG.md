@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `TFIDFVectorizer` in `src/preprocessing/text/tfidf_vectorizer.rs` reweights
+  the bag-of-words counts of a `String` column by inverse document frequency:
+  `fit` learns the vocabulary and one idf per term through the existing
+  `CountVectorizer`, and `transform` emits the TF-IDF weights as `Float64`
+  columns. The term frequency (`RawCount`, `TermFrequency`, `Binary`, `LogTf`),
+  the idf formula (`Unsmoothed`, `Smoothed`, `Probabilistic`) and the row
+  normalization (`None`, `L1`, `L2`) are all configurable, and `sublinear_tf`
+  applies `1 + ln(count)` to the raw counts before weighting (#77).
 - `SelectPercentile` in `src/feature_selection/select_percentile.rs` ranks
   features with a scoring function and keeps the top `percentile` percent of
   them, rounding up to at least one feature. Ties break on column name and
