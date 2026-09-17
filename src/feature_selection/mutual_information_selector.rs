@@ -11,10 +11,6 @@ use crate::util::require_f64_columns;
 use polars::prelude::*;
 use statrs::function::gamma::digamma;
 
-/// Fraction of the target's range added to a discrete target so exact ties in
-/// it cannot collapse the joint `k`-th neighbour distance to zero.
-const JITTER: f64 = 1e-10;
-
 /// Whether the target of [`MutualInformationSelector`] is discrete or
 /// continuous.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -52,11 +48,11 @@ pub enum MITask {
 /// joint neighbour's distance is what keeps the estimate insensitive to the
 /// units each variable is measured in.
 ///
-/// The feature and the target are each min-max scaled to `[0, 1]` before the
-/// distances are taken. Mutual information is invariant under rescaling either
-/// variable, but the max-norm distance is not, so without scaling a feature
-/// whose values span wide units would dominate the joint radius and flatten
-/// every score to zero.
+/// The feature — and, for [`MITask::Regression`], the target — is min-max
+/// scaled to `[0, 1]` before the distances are taken. Mutual information is
+/// invariant under rescaling either variable, but the max-norm distance is not,
+/// so without scaling a feature whose values span wide units would dominate the
+/// joint radius and flatten every score to zero.
 ///
 /// The estimator is asymptotic, so estimates carry a finite-sample bias: with
 /// few usable rows (in practice fewer than a few dozen) they are noisy, and an
@@ -68,13 +64,21 @@ pub enum MITask {
 ///
 /// # Target treatment
 ///
-/// [`MITask::Regression`] applies the estimator to the target as it is.
-/// [`MITask::Classification`] first offsets the target by a negligible,
-/// deterministic amount — at most `1e-10` of its scaled range, derived from the
-/// row order — the same treatment scikit-learn's `mutual_info_classif` gives a
-/// discrete target with random noise. Without it, the exact ties of a discrete
-/// target collapse the joint `k`-th neighbour distance to zero and inflate the
-/// estimate.
+/// [`MITask::Regression`] treats the target as continuous and applies the
+/// estimator above to both variables. [`MITask::Classification`] treats it as a
+/// set of labels and scores the feature with the continuous/discrete estimator
+/// of Ross (2014), the one scikit-learn's `mutual_info_classif` uses:
+///
+/// ```text
+/// MI = ψ(N) + <ψ(k_i)> - <ψ(c_i)> - <ψ(m_i)>
+/// ```
+///
+/// where `c_i` is the number of rows sharing row `i`'s label, `k_i` the smaller
+/// of `n_neighbors` and `c_i - 1`, and `m_i` the number of rows of any label
+/// within row `i`'s distance to its `k_i`-th same-label neighbour in the feature
+/// space. Rows whose label occurs only once are left out of the means. Compared
+/// with running the continuous estimator on a jittered target, this costs no
+/// arbitrary offset and does not depend on the order of the rows.
 ///
 /// `n_neighbors` is clamped to `[1, rows - 1]` per feature, so asking for more
 /// neighbours than there are usable rows is safe rather than an error — but a
@@ -105,12 +109,18 @@ pub enum MITask {
 /// use featrs::traits::{FitSupervised, Transform};
 /// use polars::prelude::{Column, DataFrame, NamedFrom, Series};
 ///
-/// let signal = Column::from(Series::new("signal".into(), &[0.0_f64, 1.0, 1.0, 0.0]));
-/// let constant = Column::from(Series::new("constant".into(), &[5.0_f64; 4]));
-/// let features = DataFrame::new(4, vec![signal, constant])?;
+/// let signal = Column::from(Series::new(
+///     "signal".into(),
+///     &[0.0_f64, 1.0, 2.0, 3.0, 4.0, 5.0, 100.0, 101.0, 102.0, 103.0, 104.0, 105.0],
+/// ));
+/// let constant = Column::from(Series::new("constant".into(), &[5.0_f64; 12]));
+/// let features = DataFrame::new(12, vec![signal, constant])?;
 ///
-/// let target = Column::from(Series::new("y".into(), &[0.0_f64, 1.0, 1.0, 0.0]));
-/// let y = DataFrame::new(4, vec![target])?;
+/// let target = Column::from(Series::new(
+///     "y".into(),
+///     &[0.0_f64, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+/// ));
+/// let y = DataFrame::new(12, vec![target])?;
 ///
 /// let mut mi = MutualInformationSelector::new().k(1);
 /// mi.fit(features.clone(), y)?;
@@ -308,11 +318,11 @@ impl Transform<DataFrame> for MutualInformationSelector {
 
 /// Score one feature against the target, in nats.
 ///
-/// `pairs` holds the usable `(feature, target)` rows in row order. Both
-/// coordinates are min-max scaled to `[0, 1]` first: mutual information is
-/// invariant under rescaling, but the estimator's max-norm distance is not, so
-/// without this a feature measured in wide units would dominate the joint
-/// radius and flatten every score to zero.
+/// `pairs` holds the usable `(feature, target)` rows. The feature (and, for
+/// regression, the target) is min-max scaled to `[0, 1]` first: mutual
+/// information is invariant under rescaling, but the estimator's max-norm
+/// distance is not, so without this a feature measured in wide units would
+/// dominate the joint radius and flatten every regression score to zero.
 ///
 /// A feature or target that never changes, and a feature with fewer than two
 /// usable rows, is scored `0.0`.
@@ -330,25 +340,22 @@ fn score_feature(pairs: &[(f64, f64)], task: MITask, n_neighbors: usize) -> f64 
         return 0.0;
     }
 
-    let n = pairs.len() as f64;
-    let mut scaled: Vec<(f64, f64)> = pairs
-        .iter()
-        .map(|&(x, y)| ((x - x_lo) / x_span, (y - y_lo) / y_span))
-        .collect();
+    let features: Vec<f64> = pairs.iter().map(|&(x, _)| (x - x_lo) / x_span).collect();
+    let targets: Vec<f64> = pairs.iter().map(|&(_, y)| y).collect();
 
-    if task == MITask::Classification {
-        // A discrete target has exact ties, which would leave the joint k-th
-        // neighbour distance at zero and inflate the estimate, so the target is
-        // offset first — the same treatment `mutual_info_classif` gives a
-        // discrete target with random noise. The offset is at most `JITTER` in
-        // the scaled units and is derived from the row order, which keeps the
-        // fit reproducible.
-        for (i, pair) in scaled.iter_mut().enumerate() {
-            pair.1 += JITTER * i as f64 / n;
+    match task {
+        MITask::Classification => {
+            estimate_mi_discrete_target(&features, &targets, n_neighbors).max(0.0)
+        }
+        MITask::Regression => {
+            let scaled: Vec<(f64, f64)> = features
+                .iter()
+                .zip(&targets)
+                .map(|(&x, &y)| (x, (y - y_lo) / y_span))
+                .collect();
+            estimate_mi(&scaled, n_neighbors).max(0.0)
         }
     }
-
-    estimate_mi(&scaled, n_neighbors).max(0.0)
 }
 
 /// Smallest and largest value of one coordinate of `pairs`.
@@ -361,6 +368,79 @@ fn range_of(pairs: &[(f64, f64)], coordinate: fn(&(f64, f64)) -> f64) -> (f64, f
         hi = hi.max(value);
     }
     (lo, hi)
+}
+
+/// Mutual information estimate (in nats) between a continuous feature and a
+/// discrete target, following Ross (2014):
+///
+/// ```text
+/// MI = ψ(N) + <ψ(k_i)> - <ψ(c_i)> - <ψ(m_i)>
+/// ```
+///
+/// over the rows whose label occurs more than once, where `c_i` counts the rows
+/// sharing row `i`'s label, `k_i` is `n_neighbors` clamped to `c_i - 1`, and
+/// `m_i` counts the rows of any label within row `i`'s distance to its `k_i`-th
+/// same-label neighbour in the feature space. Only distances within one feature
+/// are ever compared, so the score does not depend on the units the feature is
+/// measured in, nor on the order of the rows.
+fn estimate_mi_discrete_target(features: &[f64], labels: &[f64], n_neighbors: usize) -> f64 {
+    let n = features.len();
+    if n < 2 {
+        return 0.0;
+    }
+
+    let label_counts: Vec<usize> = (0..n)
+        .map(|i| labels.iter().filter(|&&label| label == labels[i]).count())
+        .collect();
+
+    let mut k_sum = 0.0;
+    let mut count_sum = 0.0;
+    let mut m_sum = 0.0;
+    let mut scored = 0usize;
+    let mut same_label_distances = Vec::with_capacity(n);
+
+    for i in 0..n {
+        if label_counts[i] < 2 {
+            // A label seen once has no same-label neighbour to measure against.
+            continue;
+        }
+        let k = n_neighbors.clamp(1, label_counts[i] - 1);
+        same_label_distances.clear();
+        for (j, &label) in labels.iter().enumerate() {
+            if j != i && label == labels[i] {
+                same_label_distances.push((features[i] - features[j]).abs());
+            }
+        }
+        same_label_distances.select_nth_unstable_by(k - 1, |a, b| a.total_cmp(b));
+        // The `<= radius` count below must not pick up rows sitting exactly at
+        // the k-th distance, so the radius is nudged one float below it.
+        let radius = shrink(same_label_distances[k - 1]);
+
+        let m = features
+            .iter()
+            .filter(|&&value| (features[i] - value).abs() <= radius)
+            .count();
+
+        k_sum += digamma(k as f64);
+        count_sum += digamma(label_counts[i] as f64);
+        m_sum += digamma(m as f64);
+        scored += 1;
+    }
+
+    if scored == 0 {
+        return 0.0;
+    }
+    let scored = scored as f64;
+    digamma(scored) + (k_sum - count_sum - m_sum) / scored
+}
+
+/// The float immediately below `radius` (and `0.0` for a zero radius).
+fn shrink(radius: f64) -> f64 {
+    if radius > 0.0 {
+        f64::from_bits(radius.to_bits() - 1)
+    } else {
+        0.0
+    }
 }
 
 /// Kraskov-Stögbauer-Grassberger mutual information estimate (algorithm 1)
@@ -458,23 +538,32 @@ mod tests {
     }
 
     /// `informative` determines the class, `unrelated` is drawn independently
-    /// of it, and `constant` never changes.
-    fn classification_features(n: usize) -> (DataFrame, DataFrame) {
+    /// of it, and `constant` never changes. `order` picks the rows, so a test
+    /// can hand the same data over in a different row order.
+    fn classification_features_in_order(n: usize, order: &[usize]) -> (DataFrame, DataFrame) {
+        let pick = |values: &[f64]| -> Vec<f64> { order.iter().map(|&i| values[i]).collect() };
         let constant = vec![5.0; n];
         let features = DataFrame::new(
             n,
             vec![
-                col("informative", &separating(n)),
-                col("unrelated", &uniform(n, 12_345)),
+                col("informative", &pick(&separating(n))),
+                col("unrelated", &pick(&uniform(n, 12_345))),
                 col("constant", &constant),
             ],
         )
         .unwrap();
-        (features, target_of(&classes(n)))
+        (features, target_of(&pick(&classes(n))))
+    }
+
+    /// [`classification_features_in_order`] in the natural row order.
+    fn classification_features(n: usize) -> (DataFrame, DataFrame) {
+        classification_features_in_order(n, &(0..n).collect::<Vec<usize>>())
     }
 
     /// `linear` tracks the target with noise; `unrelated` is independent of it.
-    fn regression_frames(n: usize) -> (DataFrame, DataFrame) {
+    /// `order` picks the rows, so a test can permute the frame.
+    fn regression_frames_in_order(n: usize, order: &[usize]) -> (DataFrame, DataFrame) {
+        let pick = |values: &[f64]| -> Vec<f64> { order.iter().map(|&i| values[i]).collect() };
         let x_linear: Vec<f64> = (0..n).map(|i| i as f64).collect();
         let noise = uniform(n, 7);
         let target: Vec<f64> = x_linear
@@ -484,10 +573,18 @@ mod tests {
             .collect();
         let features = DataFrame::new(
             n,
-            vec![col("unrelated", &uniform(n, 99)), col("linear", &x_linear)],
+            vec![
+                col("unrelated", &pick(&uniform(n, 99))),
+                col("linear", &pick(&x_linear)),
+            ],
         )
         .unwrap();
-        (features, target_of(&target))
+        (features, target_of(&pick(&target)))
+    }
+
+    /// [`regression_frames_in_order`] in the natural row order.
+    fn regression_frames(n: usize) -> (DataFrame, DataFrame) {
+        regression_frames_in_order(n, &(0..n).collect::<Vec<usize>>())
     }
 
     /// A binary feature that repeats a binary target exactly, so the joint k-th
@@ -595,21 +692,20 @@ mod tests {
 
     #[test]
     fn test_classification_estimate_is_close_to_the_true_mutual_information() {
-        // A balanced binary target and a feature that repeats it exactly: the
-        // true mutual information is `ln 2` nats. The estimator is
-        // finite-sample biased, so this asserts the band around it that the
-        // struct documents rather than the exact value.
+        // A balanced binary target and a feature that determines it: the true
+        // mutual information is `ln 2` nats. The estimator is finite-sample
+        // biased, so this asserts the band around it that the struct documents
+        // rather than the exact value.
         let n = 200;
-        let labels = classes(n);
         let features = DataFrame::new(
             n,
-            vec![col("signal", &labels), col("noise", &uniform(n, 42))],
+            vec![col("signal", &separating(n)), col("noise", &uniform(n, 42))],
         )
         .unwrap();
         let mi = fitted(
             MutualInformationSelector::new(),
             features,
-            target_of(&labels),
+            target_of(&classes(n)),
         );
 
         assert_relative_eq!(score_of(&mi, "signal"), 2.0_f64.ln(), epsilon = 0.5);
@@ -617,21 +713,42 @@ mod tests {
     }
 
     #[test]
-    fn test_classification_offset_keeps_tie_heavy_estimates_meaningful() {
-        let (features, target) = tie_heavy_frames();
-        let classification = fitted(
-            MutualInformationSelector::new().task(MITask::Classification),
-            features.clone(),
-            target.clone(),
-        );
-        let regression = fitted(
+    fn test_scores_do_not_depend_on_row_order() {
+        // Mutual information is a property of the joint distribution, not of
+        // the order the rows arrive in; only float summation may differ.
+        let reversed: Vec<usize> = (0..N).rev().collect();
+
+        let (features, target) = classification_features(N);
+        let straight = fitted(MutualInformationSelector::new(), features, target);
+        let (features, target) = classification_features_in_order(N, &reversed);
+        let shuffled = fitted(MutualInformationSelector::new(), features, target);
+        for name in ["informative", "unrelated", "constant"] {
+            assert_relative_eq!(
+                score_of(&straight, name),
+                score_of(&shuffled, name),
+                epsilon = 1e-9
+            );
+        }
+
+        let (features, target) = regression_frames(N);
+        let straight = fitted(
             MutualInformationSelector::new().task(MITask::Regression),
-            features.clone(),
+            features,
             target,
         );
-
-        assert!(score_of(&classification, "signal") > 0.0);
-        assert!(score_of(&regression, "signal") > score_of(&classification, "signal"));
+        let (features, target) = regression_frames_in_order(N, &reversed);
+        let shuffled = fitted(
+            MutualInformationSelector::new().task(MITask::Regression),
+            features,
+            target,
+        );
+        for name in ["linear", "unrelated"] {
+            assert_relative_eq!(
+                score_of(&straight, name),
+                score_of(&shuffled, name),
+                epsilon = 1e-9
+            );
+        }
     }
 
     #[test]
@@ -680,6 +797,7 @@ mod tests {
             target,
         );
 
+        assert!(score_of(&classification, "signal") > 0.0);
         assert_ne!(
             score_of(&classification, "signal"),
             score_of(&regression, "signal")
