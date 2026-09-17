@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `MutualInformationSelector` in
+  `src/feature_selection/mutual_information_selector.rs` ranks `Float64`
+  features by mutual information with a single target column and keeps the top
+  `k`, so non-linear dependencies are caught where correlation only sees
+  straight lines. Scores come from a brute-force Kraskov-Stögbauer-Grassberger
+  k-nearest neighbour estimator (no spatial index, `O(rows²)` per feature, no
+  new dependency); `MITask::Regression` and `MITask::Classification` cover
+  continuous and discrete targets, `n_neighbors` tunes the neighbourhood, ties
+  break by column name, and constant features score `0` (#53).
+
 - `TFIDFVectorizer` in `src/preprocessing/text/tfidf_vectorizer.rs` reweights
   the bag-of-words counts of a `String` column by inverse document frequency:
   `fit` learns the vocabulary and one idf per term through the existing

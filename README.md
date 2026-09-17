@@ -71,6 +71,7 @@ let scaled = scaler.transform(data)?;
 | | `SelectKBest` | Select top-k features by statistical test (ANOVA F) |
 | | `SelectPercentile` | Select the top N% of features by statistical test |
 | | `CorrelationThreshold` | Drop features highly correlated with others |
+| | `MutualInformationSelector` | Rank/select top-k features by mutual information with the target |
 | **Auto** | `AutoTypeDetector` | Auto-detect column types and apply default transforms |
 
 ## Examples
