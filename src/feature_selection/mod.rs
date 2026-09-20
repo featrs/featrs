@@ -5,11 +5,13 @@
 //! to a statistical test.
 
 pub mod correlation_threshold;
+pub mod mutual_information_selector;
 pub mod select_kbest;
 pub mod select_percentile;
 pub mod variance_threshold;
 
 pub use correlation_threshold::CorrelationThreshold;
+pub use mutual_information_selector::{MITask, MutualInformationSelector};
 pub use select_kbest::FRegression;
 pub use select_kbest::SelectKBest;
 pub use select_percentile::SelectPercentile;
