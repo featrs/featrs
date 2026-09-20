@@ -12,6 +12,11 @@ use crate::traits::{Error, Fit, Result, Transform};
 use polars::prelude::*;
 use std::collections::{HashMap, HashSet};
 
+/// The distinct non-null values of a `String` column, ascending by byte order.
+///
+/// The sorted order is load-bearing: [`OneHotEncoder`] tests membership with a
+/// binary search over these values, so callers must keep receiving sorted
+/// output.
 fn column_unique_strings(col: &Column) -> Result<Vec<String>> {
     let s = col.as_materialized_series();
     let ca = s.str().map_err(|e| {
@@ -31,7 +36,36 @@ fn column_unique_strings(col: &Column) -> Result<Vec<String>> {
         .into_iter()
         .collect();
     unique.sort();
+    debug_assert!(unique.is_sorted(), "categories must stay sorted");
     Ok(unique)
+}
+
+/// How [`OneHotEncoder`] treats a category that is present at `transform`
+/// time but was never observed during `fit`.
+///
+/// The policy only applies to non-null values: a null is not a category, so
+/// nulls keep the encoder's usual all-zeros encoding and never trigger an
+/// unseen-category error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HandleUnknown {
+    /// Reject unseen categories with [`Error::InvalidInput`], naming the
+    /// column and the first offending value (default).
+    ///
+    /// This preserves data integrity: without a signal, an unseen category
+    /// encodes to an all-zeros row that is indistinguishable from the dropped
+    /// baseline category when `drop_first` is enabled.
+    #[default]
+    Error,
+    /// Encode unseen categories as an all-zeros row instead of failing.
+    ///
+    /// This makes the historical behaviour explicit for callers who want it.
+    ///
+    /// # Warning
+    ///
+    /// With [`drop_first`](OneHotEncoder::drop_first) enabled, the dropped
+    /// baseline category also encodes to an all-zeros row, so under this
+    /// policy an unseen category and the baseline are indistinguishable.
+    Ignore,
 }
 
 /// Encode categorical features as a one-hot numeric array.
@@ -41,26 +75,51 @@ fn column_unique_strings(col: &Column) -> Result<Vec<String>> {
 /// name that collides with an input column or another generated column is
 /// rejected at fit with [`Error::InvalidInput`].
 ///
+/// A category that is unseen at `transform` time is rejected with
+/// [`Error::InvalidInput`] by default. Use
+/// [`handle_unknown`](Self::handle_unknown) with [`HandleUnknown::Ignore`] to
+/// opt back into the historical all-zeros encoding. Note that under that
+/// policy the ambiguity with `drop_first` is real: the dropped baseline
+/// category is *also* all zeros, so an unseen category becomes
+/// indistinguishable from it.
+///
 /// # Example
 ///
 /// ```rust
-/// use featrs::preprocessing::encoder::OneHotEncoder;
+/// use featrs::preprocessing::encoder::{HandleUnknown, OneHotEncoder};
 /// use featrs::traits::{Fit, Transform};
 /// use polars::prelude::{Column, DataFrame, NamedFrom, Series};
 ///
 /// let col = Column::from(Series::new("color".into(), &["red", "blue", "red"]));
 /// let df = DataFrame::new(3, vec![col])?;
+/// let unseen = DataFrame::new(
+///     1,
+///     vec![Column::from(Series::new("color".into(), &["mauve"]))],
+/// )?;
 ///
-/// let mut enc = OneHotEncoder::new().drop_first(false);
-/// enc.fit(df.clone())?;
-/// let encoded = enc.transform(df)?;
+/// // Default: unseen categories are an error, so category drift between fit
+/// // and transform cannot pass silently. The error names column and value.
+/// let mut strict = OneHotEncoder::new().drop_first(false);
+/// strict.fit(df.clone())?;
+/// let encoded = strict.transform(df.clone())?;
 /// assert_eq!(encoded.width(), 2);
+/// let err = strict.transform(unseen.clone()).unwrap_err();
+/// assert!(format!("{err}").contains("mauve"));
+///
+/// // Opt in to the all-zeros encoding for unseen categories instead.
+/// let mut lenient = OneHotEncoder::new()
+///     .drop_first(false)
+///     .handle_unknown(HandleUnknown::Ignore);
+/// lenient.fit(df.clone())?;
+/// let encoded = lenient.transform(unseen)?;
+/// assert_eq!(encoded.column("color_red")?.f64()?.get(0), Some(0.0));
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 pub struct OneHotEncoder {
     fitted: bool,
     categories: Option<Vec<OneHotCategory>>,
     drop_first: bool,
+    handle_unknown: HandleUnknown,
 }
 
 struct OneHotCategory {
@@ -86,17 +145,39 @@ fn planned_pairs(cats: &[OneHotCategory], drop_first: bool) -> Vec<(String, Stri
         .collect()
 }
 
+/// Resolve a fitted column from the `transform` input as a string series,
+/// with the encoder's standard "missing column" / "wrong dtype" errors.
+fn fitted_series<'a>(x: &'a DataFrame, col: &str, fitted: &[String]) -> Result<&'a StringChunked> {
+    let s = x.column(col).map_err(|e| {
+        Error::InvalidInput(format!(
+            "OneHotEncoder.transform: column '{}' not found in input. \
+             The encoder was fitted on columns: {:?}. {}",
+            col, fitted, e
+        ))
+    })?;
+    s.as_materialized_series().str().map_err(|e| {
+        Error::InvalidInput(format!(
+            "OneHotEncoder.transform: column '{}' has dtype {}; expected String. {}",
+            col,
+            s.dtype(),
+            e
+        ))
+    })
+}
+
 impl OneHotEncoder {
     /// Create a new `OneHotEncoder`.
     ///
     /// By default, a column is created for every category. Use
     /// [`drop_first`](Self::drop_first) to drop the first category
-    /// and avoid multicollinearity.
+    /// and avoid multicollinearity. Unseen categories are rejected at
+    /// `transform` time; see [`handle_unknown`](Self::handle_unknown).
     pub fn new() -> Self {
         Self {
             fitted: false,
             categories: None,
             drop_first: false,
+            handle_unknown: HandleUnknown::default(),
         }
     }
 
@@ -106,6 +187,13 @@ impl OneHotEncoder {
     /// output, producing `k-1` columns for a feature with `k` categories.
     pub fn drop_first(mut self, value: bool) -> Self {
         self.drop_first = value;
+        self
+    }
+
+    /// How to treat a category seen at `transform` time but not at `fit` time
+    /// (default: [`HandleUnknown::Error`]).
+    pub fn handle_unknown(mut self, value: HandleUnknown) -> Self {
+        self.handle_unknown = value;
         self
     }
 }
@@ -198,27 +286,52 @@ impl Transform<DataFrame> for OneHotEncoder {
                     .into(),
             )
         })?;
+        let fitted_columns: Vec<String> = cats.iter().map(|c| c.column.clone()).collect();
+        let start = if self.drop_first { 1 } else { 0 };
+
+        // An unseen category would encode to an all-zeros row: under the
+        // default policy that is rejected up front, naming the first offending
+        // (column, value) in fit order. Nulls are not categories, so they are
+        // skipped here and keep their usual all-zeros encoding.
+        if self.handle_unknown == HandleUnknown::Error {
+            for cat in cats {
+                // Every category of this column is dropped by `drop_first`, so
+                // it emits nothing and is not required in the transform input.
+                if cat.categories.len() <= start {
+                    continue;
+                }
+                let ca = fitted_series(&x, &cat.column, &fitted_columns)?;
+                for v in ca.iter().flatten() {
+                    if cat
+                        .categories
+                        .binary_search_by(|c| c.as_str().cmp(v))
+                        .is_err()
+                    {
+                        // A high-cardinality column can hold thousands of
+                        // categories, so keep the diagnostic bounded.
+                        let shown = &cat.categories[..cat.categories.len().min(12)];
+                        return Err(Error::InvalidInput(format!(
+                            "OneHotEncoder.transform: column '{}' contains category '{}' \
+                             that was not seen during fit (first {} of {} fitted \
+                             categories: {:?}). Use \
+                             .handle_unknown(HandleUnknown::Ignore) to encode unseen \
+                             categories as an all-zeros row.",
+                            cat.column,
+                            v,
+                            shown.len(),
+                            cat.categories.len(),
+                            shown
+                        )));
+                    }
+                }
+            }
+        }
+
         let mut new_cols: Vec<Column> = Vec::new();
         let n_rows = x.height();
 
         for (col, category) in &planned_pairs(cats, self.drop_first) {
-            let s = x.column(col).map_err(|e| {
-                Error::InvalidInput(format!(
-                    "OneHotEncoder.transform: column '{}' not found in input. \
-                     The encoder was fitted on columns: {:?}. {}",
-                    col,
-                    cats.iter().map(|c| &c.column).collect::<Vec<_>>(),
-                    e
-                ))
-            })?;
-            let ca = s.as_materialized_series().str().map_err(|e| {
-                Error::InvalidInput(format!(
-                    "OneHotEncoder.transform: column '{}' has dtype {}; expected String. {}",
-                    col,
-                    s.dtype(),
-                    e
-                ))
-            })?;
+            let ca = fitted_series(&x, col, &fitted_columns)?;
 
             let mut vals = vec![0.0f64; n_rows];
             for (i, opt) in ca.iter().enumerate() {
@@ -1216,6 +1329,297 @@ mod tests {
             matches!(err2, Error::NotFitted(_)),
             "failed re-fit must clear the output plan"
         );
+    }
+
+    fn one_hot_train() -> DataFrame {
+        DataFrame::new(
+            3,
+            vec![Column::from(Series::new(
+                "color".into(),
+                &["red", "blue", "red"],
+            ))],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn test_one_hot_unseen_category_errors_by_default() {
+        let mut enc = OneHotEncoder::new();
+        enc.fit(one_hot_train()).unwrap();
+
+        // "mauve" was never seen during fit -> error naming column and value.
+        let test = DataFrame::new(
+            2,
+            vec![Column::from(Series::new("color".into(), &["red", "mauve"]))],
+        )
+        .unwrap();
+        match enc.transform(test).unwrap_err() {
+            Error::InvalidInput(msg) => {
+                assert!(msg.contains("color"), "expected column name, got: {msg}");
+                assert!(msg.contains("mauve"), "expected unseen value, got: {msg}");
+            }
+            other => panic!("expected Error::InvalidInput, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_one_hot_unseen_category_ignored_is_all_zeros() {
+        let mut enc = OneHotEncoder::new().handle_unknown(HandleUnknown::Ignore);
+        enc.fit(one_hot_train()).unwrap();
+
+        let test = DataFrame::new(
+            2,
+            vec![Column::from(Series::new("color".into(), &["red", "mauve"]))],
+        )
+        .unwrap();
+        let result = enc.transform(test).unwrap();
+
+        let red: Vec<f64> = result
+            .column("color_red")
+            .unwrap()
+            .f64()
+            .unwrap()
+            .iter()
+            .flatten()
+            .collect();
+        let blue: Vec<f64> = result
+            .column("color_blue")
+            .unwrap()
+            .f64()
+            .unwrap()
+            .iter()
+            .flatten()
+            .collect();
+        // Seen value keeps its dummy column; the unseen row is all zeros.
+        assert_eq!(red, vec![1.0, 0.0]);
+        assert_eq!(blue, vec![0.0, 0.0]);
+    }
+
+    #[test]
+    fn test_one_hot_unseen_category_ignore_drop_first_matches_baseline() {
+        // With drop_first, the baseline category "blue" also encodes to an
+        // all-zeros row, so "mauve" and "blue" are indistinguishable.
+        let mut enc = OneHotEncoder::new()
+            .drop_first(true)
+            .handle_unknown(HandleUnknown::Ignore);
+        enc.fit(one_hot_train()).unwrap();
+
+        let test = DataFrame::new(
+            2,
+            vec![Column::from(Series::new(
+                "color".into(),
+                &["blue", "mauve"],
+            ))],
+        )
+        .unwrap();
+        let result = enc.transform(test).unwrap();
+
+        // Only "color_red" survives drop_first; both rows are all zeros.
+        assert_eq!(result.width(), 1);
+        let red: Vec<f64> = result
+            .column("color_red")
+            .unwrap()
+            .f64()
+            .unwrap()
+            .iter()
+            .flatten()
+            .collect();
+        assert_eq!(red, vec![0.0, 0.0]);
+    }
+
+    #[test]
+    fn test_one_hot_nulls_at_transform_are_not_unseen_categories() {
+        let df = DataFrame::new(
+            4,
+            vec![Column::from(Series::new(
+                "c".into(),
+                &[Some("a"), None, Some("b"), Some("a")],
+            ))],
+        )
+        .unwrap();
+
+        // Default policy: a null is not an unseen category, so transform must
+        // not error and the null row encodes to all zeros.
+        let mut enc = OneHotEncoder::new();
+        enc.fit(df.clone()).unwrap();
+        let result = enc.transform(df).unwrap();
+
+        let a: Vec<f64> = result
+            .column("c_a")
+            .unwrap()
+            .f64()
+            .unwrap()
+            .iter()
+            .flatten()
+            .collect();
+        assert_eq!(a, vec![1.0, 0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn test_one_hot_multiple_unseen_columns_names_first_offender() {
+        let train = DataFrame::new(
+            2,
+            vec![
+                Column::from(Series::new("color".into(), &["red", "blue"])),
+                Column::from(Series::new("size".into(), &["S", "M"])),
+            ],
+        )
+        .unwrap();
+        let mut enc = OneHotEncoder::new();
+        enc.fit(train).unwrap();
+
+        // Both columns carry an unseen value on the same row; the first
+        // fitted column is reported.
+        let test = DataFrame::new(
+            2,
+            vec![
+                Column::from(Series::new("color".into(), &["red", "mauve"])),
+                Column::from(Series::new("size".into(), &["S", "XXL"])),
+            ],
+        )
+        .unwrap();
+        match enc.transform(test).unwrap_err() {
+            Error::InvalidInput(msg) => {
+                assert!(msg.contains("color"), "expected first column, got: {msg}");
+                assert!(msg.contains("mauve"), "expected first value, got: {msg}");
+                assert!(!msg.contains("XXL"), "expected no second value, got: {msg}");
+            }
+            other => panic!("expected Error::InvalidInput, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_one_hot_handle_unknown_builder_sets_policy() {
+        let unseen = DataFrame::new(
+            2,
+            vec![Column::from(Series::new("color".into(), &["red", "mauve"]))],
+        )
+        .unwrap();
+
+        let mut default_enc = OneHotEncoder::new();
+        default_enc.fit(one_hot_train()).unwrap();
+        assert!(
+            default_enc.transform(unseen.clone()).is_err(),
+            "default policy must reject unseen categories"
+        );
+
+        let mut explicit_error = OneHotEncoder::new().handle_unknown(HandleUnknown::Error);
+        explicit_error.fit(one_hot_train()).unwrap();
+        assert!(
+            explicit_error.transform(unseen.clone()).is_err(),
+            "HandleUnknown::Error must reject unseen categories"
+        );
+
+        let mut ignore = OneHotEncoder::new().handle_unknown(HandleUnknown::Ignore);
+        ignore.fit(one_hot_train()).unwrap();
+        assert!(
+            ignore.transform(unseen).is_ok(),
+            "HandleUnknown::Ignore must accept unseen categories"
+        );
+    }
+
+    #[test]
+    fn test_one_hot_handle_unknown_default_is_error_and_reexported() {
+        assert_eq!(HandleUnknown::default(), HandleUnknown::Error);
+        // The policy type is part of the crate's public prelude.
+        let _: crate::prelude::HandleUnknown = crate::prelude::HandleUnknown::default();
+    }
+
+    #[test]
+    fn test_one_hot_drop_first_baseline_still_accepted_under_error() {
+        // The dropped baseline ("blue") is a category that WAS seen at fit, so
+        // the strict policy must accept it: it encodes to an all-zeros row.
+        let mut enc = OneHotEncoder::new().drop_first(true);
+        enc.fit(one_hot_train()).unwrap();
+
+        let test = DataFrame::new(
+            2,
+            vec![Column::from(Series::new("color".into(), &["blue", "red"]))],
+        )
+        .unwrap();
+        let result = enc.transform(test).unwrap();
+
+        assert_eq!(result.width(), 1);
+        let red: Vec<f64> = result
+            .column("color_red")
+            .unwrap()
+            .f64()
+            .unwrap()
+            .iter()
+            .flatten()
+            .collect();
+        assert_eq!(red, vec![0.0, 1.0]);
+    }
+
+    #[test]
+    fn test_one_hot_unseen_rejected_with_drop_first() {
+        let mut enc = OneHotEncoder::new().drop_first(true);
+        enc.fit(one_hot_train()).unwrap();
+
+        let test = DataFrame::new(
+            2,
+            vec![Column::from(Series::new(
+                "color".into(),
+                &["blue", "mauve"],
+            ))],
+        )
+        .unwrap();
+        match enc.transform(test).unwrap_err() {
+            Error::InvalidInput(msg) => assert!(msg.contains("mauve"), "got: {msg}"),
+            other => panic!("expected Error::InvalidInput, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_one_hot_column_fully_dropped_by_drop_first_not_required() {
+        // A single-category column emits no output column under drop_first, so
+        // the strict policy must not require it in the transform frame.
+        let train = DataFrame::new(
+            2,
+            vec![
+                Column::from(Series::new("constant".into(), &["only", "only"])),
+                Column::from(Series::new("color".into(), &["red", "blue"])),
+            ],
+        )
+        .unwrap();
+        let mut enc = OneHotEncoder::new().drop_first(true);
+        enc.fit(train).unwrap();
+
+        let test = DataFrame::new(
+            2,
+            vec![Column::from(Series::new("color".into(), &["red", "blue"]))],
+        )
+        .unwrap();
+        let result = enc.transform(test).unwrap();
+
+        // Sorted categories are ["blue", "red"] -> only "color_red" survives.
+        assert_eq!(result.width(), 1);
+    }
+
+    #[test]
+    fn test_one_hot_missing_and_wrong_dtype_columns_error() {
+        let mut enc = OneHotEncoder::new();
+        enc.fit(one_hot_train()).unwrap();
+
+        // The fitted column is absent from the transform frame.
+        let missing = DataFrame::new(
+            2,
+            vec![Column::from(Series::new("other".into(), &["a", "b"]))],
+        )
+        .unwrap();
+        match enc.transform(missing).unwrap_err() {
+            Error::InvalidInput(msg) => assert!(msg.contains("color"), "got: {msg}"),
+            other => panic!("expected Error::InvalidInput, got {other:?}"),
+        }
+
+        // The fitted column is present under the same name but is not String.
+        let wrong_dtype = DataFrame::new(
+            2,
+            vec![Column::from(Series::new("color".into(), &[1.0f64, 2.0]))],
+        )
+        .unwrap();
+        let err = enc.transform(wrong_dtype).unwrap_err();
+        assert!(matches!(err, Error::InvalidInput(_)));
     }
 
     #[test]

@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `OneHotEncoder` in `src/preprocessing/encoder.rs` now rejects categories
+  unseen during `fit` instead of silently encoding them as an all-zeros row,
+  which is indistinguishable from the dropped baseline when `drop_first` is
+  enabled. The new `HandleUnknown` enum selects the policy: `Error` (default)
+  names the offending column and value in an `Error::InvalidInput`, while
+  `Ignore` keeps the previous all-zeros behaviour as an explicit opt-in
+  (#137). `AutoTypeDetector` one-hots its categorical columns with the default
+  policy, so it now reports the same unseen-category failure (wrapped as
+  `Error::Computation`) instead of emitting all-zeros columns.
+
 - `MutualInformationSelector` in
   `src/feature_selection/mutual_information_selector.rs` ranks `Float64`
   features by mutual information with a single target column and keeps the top

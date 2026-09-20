@@ -73,6 +73,7 @@ pub mod prelude {
     pub use crate::preprocessing::encoder::BinaryEncoder;
     pub use crate::preprocessing::encoder::CountEncoder;
     pub use crate::preprocessing::encoder::FrequencyEncoder;
+    pub use crate::preprocessing::encoder::HandleUnknown;
     pub use crate::preprocessing::encoder::LabelEncoder;
     pub use crate::preprocessing::encoder::OneHotEncoder;
     pub use crate::preprocessing::encoder::OrdinalEncoder;
