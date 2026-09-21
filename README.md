@@ -40,7 +40,7 @@ let scaled = scaler.transform(data)?;
 | | `KBinsDiscretizer` | Bin continuous features into `n_bins` discrete bins (uniform, quantile, or k-means) as ordinal or one-hot |
 | **Normalization** | `Normalizer` | Row-wise L1, L2, or Max normalization |
 | | `Binarizer` | Threshold-based binarization; in Float64 columns, nulls and NaN pass through as null |
-| **Encoding** | `OneHotEncoder` | Create binary dummy columns for categories |
+| **Encoding** | `OneHotEncoder` | Create binary dummy columns for categories; unseen categories error by default (`HandleUnknown`) |
 | | `LabelEncoder` | Encode labels as `0..n_classes-1` integers |
 | | `OrdinalEncoder` | Per-column category → integer encoding |
 | | `CountEncoder` | Replace categories with their raw occurrence counts |
