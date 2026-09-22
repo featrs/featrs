@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `HolidayEncoder` in `src/preprocessing/holiday_encoder.rs` appends a binary
+  `Float64` `{column}_is_holiday` indicator (`1.0`/`0.0`, nulls preserved) to
+  every configured `Date`/`Datetime` column, marking whether each row's date
+  falls on a statutory holiday of the selected `HolidayCountry` (`US`, `GB`,
+  `DE`, `FR`, `JP`, `IN`). Calendars are computed from explicit per-country
+  rules in pure Rust — fixed dates, nth-weekday-of-month dates (including the
+  last occurrence), and Easter-relative dates from the Gregorian computus — so
+  no holiday data file, new dependency, or network access is needed and every
+  year is covered. `fit` scopes the holiday set to the years present in the
+  data, `transform` resolves dates outside that span from the rules, and
+  holidays that are not Gregorian-derivable (lunar festivals, Japan's equinox
+  days) are documented as out of scope rather than guessed (#60).
+
 - `OneHotEncoder` in `src/preprocessing/encoder.rs` now rejects categories
   unseen during `fit` instead of silently encoding them as an all-zeros row,
   which is indistinguishable from the dropped baseline when `drop_first` is

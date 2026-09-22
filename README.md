@@ -62,6 +62,7 @@ let scaled = scaler.transform(data)?;
 | | `Difference` | Differencing (`x[t] - x[t-1]`) and percentage change |
 | | `DatetimeFeatures` | Extract year/month/weekday/quarter/… components from date columns |
 | | `TimeSince` | Elapsed time from a reference timestamp (`{column}_since_{unit}`) in seconds…weeks |
+| | `HolidayEncoder` | Binary `{column}_is_holiday` indicator for a country's statutory holidays (US, GB, DE, FR, JP, IN) |
 | **Text** | `CharacterNGramVectorizer` | Character n-gram term-count features (char, or char-within-word-boundary) |
 | | `CountVectorizer` | Bag-of-words term counts from a tokenized text column |
 | | `TFIDFVectorizer` | TF-IDF weights from a text column (word counts reweighted by inverse document frequency) |
