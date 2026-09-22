@@ -80,6 +80,7 @@ pub mod prelude {
     pub use crate::preprocessing::encoder_loo::LeaveOneOutEncoder;
     pub use crate::preprocessing::encoder_target::TargetEncoder;
     pub use crate::preprocessing::feature_hasher::FeatureHasher;
+    pub use crate::preprocessing::holiday_encoder::{HolidayCountry, HolidayEncoder};
     pub use crate::preprocessing::imputer::SimpleImputer;
     pub use crate::preprocessing::imputer::Strategy;
     pub use crate::preprocessing::interaction_features::InteractionFeatures;
