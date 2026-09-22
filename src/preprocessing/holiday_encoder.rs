@@ -48,7 +48,7 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::traits::{Error, Fit, Result, Transform};
 use polars::prelude::*;
@@ -96,7 +96,7 @@ pub enum HolidayCountry {
 /// | [`GB`](HolidayCountry::GB) | New Year's Day (since 1974); Good Friday; Easter Monday; Early May bank holiday (1st Mon May, since 1978); Spring bank holiday (last Mon May); Summer bank holiday (last Mon Aug); Christmas (Dec 25); Boxing Day (Dec 26) | England and Wales. |
 /// | [`DE`](HolidayCountry::DE) | Neujahr (Jan 1); Karfreitag; Ostermontag; Tag der Arbeit (May 1); Christi Himmelfahrt (Easter + 39); Pfingstmontag (Easter + 50); Tag der Deutschen Einheit (Oct 3, since 1990); 1./2. Weihnachtstag (Dec 25/26) | Nationwide only. |
 /// | [`FR`](HolidayCountry::FR) | Jour de l'An (Jan 1); Lundi de Pâques; Fête du Travail (May 1); Victoire 1945 (May 8); Ascension (Easter + 39); Lundi de Pentecôte (Easter + 50); Fête Nationale (Jul 14); Assomption (Aug 15); Toussaint (Nov 1); Armistice (Nov 11); Noël (Dec 25) | Good Friday is *not* a French holiday. |
-/// | [`JP`](HolidayCountry::JP) | 元日 (Jan 1); Coming of Age Day (2nd Mon Jan); National Foundation Day (Feb 11); Emperor's Birthday (Feb 23, since 2020 / Dec 23 until 2018); Showa Day (Apr 29); Constitution Memorial Day (May 3); Greenery Day (May 4); Children's Day (May 5); Marine Day (3rd Mon Jul); Mountain Day (Aug 11, since 2016); Respect for the Aged Day (3rd Mon Sep); Sports Day (2nd Mon Oct); Culture Day (Nov 3); Labor Thanksgiving Day (Nov 23) | Current era. |
+/// | [`JP`](HolidayCountry::JP) | 元日 (Jan 1); Coming of Age Day (2nd Mon Jan); National Foundation Day (Feb 11); Emperor's Birthday (Feb 23 since 2020, Dec 23 1989–2018); Showa Day (Apr 29); Constitution Memorial Day (May 3); Greenery Day (May 4); Children's Day (May 5); Marine Day (3rd Mon Jul); Mountain Day (Aug 11, since 2016); Respect for the Aged Day (3rd Mon Sep); Sports Day (2nd Mon Oct); Culture Day (Nov 3); Labor Thanksgiving Day (Nov 23) | Current era. |
 /// | [`IN`](HolidayCountry::IN) | Republic Day (Jan 26); Good Friday; Independence Day (Aug 15); Gandhi Jayanti (Oct 2); Christmas (Dec 25) | Central-government gazetted. |
 ///
 /// # Exclusions and known limits
@@ -124,8 +124,8 @@ pub enum HolidayCountry {
 ///   (Coronation); Japan moved Marine Day and Sports Day for the 2020/2021
 ///   Olympics and had extra one-off holidays around the 2019 enthronement.
 ///   Those single-year exceptions are not represented — the rules give the
-///   ordinary date. The 2019 gap in Japan's Emperor's Birthday *is* handled,
-///   by the `until`/`since` bounds on the two era-specific rules.
+///   ordinary date. The 2019 gap in Japan's Emperor's Birthday *is* handled, by
+///   the 1989–2018 / since-2020 bounds on the two era-specific rules.
 /// - **Timezones.** A `Datetime` column is truncated to the calendar day of its
 ///   stored instant; timezone metadata is ignored (an instant is treated as
 ///   UTC-naive), so a timezone-aware column must already carry the instants
@@ -381,12 +381,12 @@ impl HolidayRule {
         }
     }
 
-    /// A rule that stopped applying after `year`.
-    const fn until(kind: RuleKind, year: i32) -> Self {
+    /// A rule that applies from `from` through `to`, inclusive.
+    const fn between(kind: RuleKind, from: i32, to: i32) -> Self {
         Self {
             kind,
-            since: None,
-            until: Some(year),
+            since: Some(from),
+            until: Some(to),
         }
     }
 
@@ -497,21 +497,21 @@ const FR_RULES: &[HolidayRule] = &[
 
 /// Japanese national holidays of the current era.
 const JP_RULES: &[HolidayRule] = &[
-    HolidayRule::always(fixed(1, 1)),        // 元日
-    HolidayRule::always(nth(1, 0, 2)),       // Coming of Age Day
-    HolidayRule::always(fixed(2, 11)),       // National Foundation Day
-    HolidayRule::since(fixed(2, 23), 2020),  // Emperor's Birthday (Reiwa)
-    HolidayRule::always(fixed(4, 29)),       // Showa Day
-    HolidayRule::always(fixed(5, 3)),        // Constitution Memorial Day
-    HolidayRule::always(fixed(5, 4)),        // Greenery Day
-    HolidayRule::always(fixed(5, 5)),        // Children's Day
-    HolidayRule::always(nth(7, 0, 3)),       // Marine Day
-    HolidayRule::since(fixed(8, 11), 2016),  // Mountain Day
-    HolidayRule::always(nth(9, 0, 3)),       // Respect for the Aged Day
-    HolidayRule::always(nth(10, 0, 2)),      // Sports Day
-    HolidayRule::always(fixed(11, 3)),       // Culture Day
-    HolidayRule::always(fixed(11, 23)),      // Labor Thanksgiving Day
-    HolidayRule::until(fixed(12, 23), 2018), // Emperor's Birthday (Heisei)
+    HolidayRule::always(fixed(1, 1)),                // 元日
+    HolidayRule::always(nth(1, 0, 2)),               // Coming of Age Day
+    HolidayRule::always(fixed(2, 11)),               // National Foundation Day
+    HolidayRule::since(fixed(2, 23), 2020),          // Emperor's Birthday (Reiwa)
+    HolidayRule::always(fixed(4, 29)),               // Showa Day
+    HolidayRule::always(fixed(5, 3)),                // Constitution Memorial Day
+    HolidayRule::always(fixed(5, 4)),                // Greenery Day
+    HolidayRule::always(fixed(5, 5)),                // Children's Day
+    HolidayRule::always(nth(7, 0, 3)),               // Marine Day
+    HolidayRule::since(fixed(8, 11), 2016),          // Mountain Day
+    HolidayRule::always(nth(9, 0, 3)),               // Respect for the Aged Day
+    HolidayRule::always(nth(10, 0, 2)),              // Sports Day
+    HolidayRule::always(fixed(11, 3)),               // Culture Day
+    HolidayRule::always(fixed(11, 23)),              // Labor Thanksgiving Day
+    HolidayRule::between(fixed(12, 23), 1989, 2018), // Emperor's Birthday (Heisei)
 ];
 
 /// Central-government gazetted holidays of India.
@@ -545,16 +545,6 @@ fn holidays_in_year(country: HolidayCountry, year: i32) -> Vec<i32> {
         .filter(|rule| rule.applies(year))
         .map(|rule| rule.resolve(year))
         .collect()
-}
-
-/// True when `day` (days since the epoch) is a holiday of `country`.
-///
-/// Used for rows whose year is outside the range materialised at fit time; it
-/// evaluates the rules for that row's own year, so it allocates per call and is
-/// deliberately kept off the hot path.
-fn is_holiday_day(country: HolidayCountry, day: i32) -> bool {
-    let (year, _, _) = civil_from_days(day);
-    holidays_in_year(country, year).contains(&day)
 }
 
 /// A column of days since the Unix epoch, with nulls preserved.
@@ -740,18 +730,26 @@ impl Transform<DataFrame> for HolidayEncoder {
             }
 
             let days = day_values(&s, col, "HolidayEncoder.transform")?;
+            // The cached set covers the fitted span; anything outside it is
+            // resolved from the rules directly so out-of-range years are
+            // answered, not zeroed. Those rows usually share a year, so the
+            // year's holiday days are built once and reused.
+            let mut outside_years: HashMap<i32, Vec<i32>> = HashMap::new();
             let flags: ChunkedArray<Float64Type> = days
                 .iter()
                 .map(|day| {
                     day.map(|day| {
-                        // The cached set covers the fitted span; anything
-                        // outside it is resolved from the rules directly so
-                        // out-of-range years are answered, not zeroed.
                         let is_holiday = match self.day_range {
                             Some((lo, hi)) if day >= lo && day <= hi => {
                                 self.holiday_days.contains(&day)
                             }
-                            _ => is_holiday_day(self.country, day),
+                            _ => {
+                                let (year, _, _) = civil_from_days(day);
+                                outside_years
+                                    .entry(year)
+                                    .or_insert_with(|| holidays_in_year(self.country, year))
+                                    .contains(&day)
+                            }
                         };
                         if is_holiday { 1.0 } else { 0.0 }
                     })
@@ -1211,6 +1209,8 @@ mod tests {
         let df = fit_on(
             &mut enc,
             &[
+                Some(d(1985, 12, 23)), // Showa era: Dec 23 was an ordinary day
+                Some(d(1989, 12, 23)), // first Heisei-era celebration
                 Some(d(2015, 12, 23)), // Heisei era Emperor's Birthday
                 Some(d(2018, 12, 23)), // last Heisei-era occurrence
                 Some(d(2024, 12, 23)), // no longer a holiday
@@ -1222,7 +1222,15 @@ mod tests {
         assert_flags(
             &out,
             "d",
-            &[Some(1.0), Some(1.0), Some(0.0), Some(0.0), Some(1.0)],
+            &[
+                Some(0.0),
+                Some(1.0),
+                Some(1.0),
+                Some(1.0),
+                Some(0.0),
+                Some(0.0),
+                Some(1.0),
+            ],
         );
     }
 
