@@ -73,7 +73,7 @@ let scaled = scaler.transform(data)?;
 | | `SelectPercentile` | Select the top N% of features by statistical test |
 | | `CorrelationThreshold` | Drop features highly correlated with others |
 | | `MutualInformationSelector` | Rank/select top-k features by mutual information with the target |
-| **Auto** | `AutoTypeDetector` | Auto-detect column types and apply default transforms |
+| **Auto** | `AutoTypeDetector` | Auto-detect column types (incl. numeric-string columns) and apply default transforms |
 
 ## Examples
 
@@ -208,8 +208,9 @@ let marked = ind.transform(df)?;  // adds {col}_missing where nulls exist
 use featrs::prelude::*;
 
 let mut atd = AutoTypeDetector::new()
-    .cat_threshold(30)     // one-hot if < 30 unique values
-    .hash_buckets(200);    // hash to 200 buckets otherwise
+    .cat_threshold(30)             // one-hot if < 30 unique values
+    .hash_buckets(200)             // hash to 200 buckets otherwise
+    .numeric_string_threshold(0.9); // >= 90% numeric-looking -> passthrough
 atd.fit(df.clone())?;
 let result = atd.transform(df)?;
 ```
