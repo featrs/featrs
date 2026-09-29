@@ -80,6 +80,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   microsecond-since-epoch instant, or the per-column min/max learned at fit;
   the unit is configurable (seconds through weeks) (#61).
 
+### Changed
+
+- `AutoTypeDetector` (`src/preprocessing/auto_type.rs`) now samples the non-null
+  values of every `String` column and classifies it `Numeric` when at least
+  `numeric_string_threshold` of them parse as a number or an ISO 8601
+  date/datetime, instead of sending numeric-looking strings to one-hot or
+  hashing. The new `numeric_string_threshold` builder method sets that fraction
+  (default `0.95`); `fit` rejects values outside `0.0..=1.0` or `NaN` with
+  `Error::InvalidInput`. A column that was previously `Categorical` purely
+  because its values were numeric strings is now `Numeric`, so downstream
+  pipeline shapes change — a string column classified `Numeric` is still
+  forwarded untouched as a `String`, and parsing it stays up to the caller.
+  Every numeric dtype (`Float32` and the narrow `Int8`/`UInt*` types included,
+  not just `Float64`/`Int64`/`Int32`) is now matched explicitly and documented
+  as passing through unscaled (#139).
+
 ## [0.4.1] - 2026-09-05
 
 ### Fixed
