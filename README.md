@@ -68,6 +68,7 @@ let scaled = scaler.transform(data)?;
 | | `TFIDFVectorizer` | TF-IDF weights from a text column (word counts reweighted by inverse document frequency) |
 | **Pipeline** | `Pipeline` | Sequentially chain multiple transformers |
 | | `ColumnTransformer` | Apply different transformers to different columns |
+| | `FeatureUnion` | Apply every transformer to the full input and concatenate the outputs |
 | **Selection** | `VarianceThreshold` | Remove low-variance features |
 | | `SelectKBest` | Select top-k features by statistical test (ANOVA F) |
 | | `SelectPercentile` | Select the top N% of features by statistical test |
@@ -109,6 +110,35 @@ let ct = ColumnTransformer::new(
     vec![("scale".into(), Box::new(StandardScaler::new()), vec!["feat_a".into()])],
     Remainder::Passthrough,
 );
+```
+
+### FeatureUnion
+
+Every transformer receives the full input and their outputs are concatenated
+horizontally. Transformers that preserve their input column names collide, so
+pair the union with branches that emit distinct columns.
+
+```rust
+use featrs::prelude::*;
+
+let mut union = FeatureUnion::new(vec![
+    (
+        "scaled_a".into(),
+        Box::new(ColumnTransformer::new(
+            vec![("s".into(), Box::new(StandardScaler::new()), vec!["feat_a".into()])],
+            Remainder::Drop,
+        )),
+    ),
+    (
+        "scaled_b".into(),
+        Box::new(ColumnTransformer::new(
+            vec![("s".into(), Box::new(StandardScaler::new()), vec!["feat_b".into()])],
+            Remainder::Drop,
+        )),
+    ),
+])?;
+union.fit(df.clone())?;
+let result = union.transform(df)?;
 ```
 
 ### PolynomialFeatures (builder pattern)

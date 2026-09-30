@@ -3,16 +3,20 @@
 //! Analogous to `sklearn.pipeline` and `sklearn.compose`.
 //! - [`Pipeline`] chains multiple transformers sequentially.
 //! - [`ColumnTransformer`] applies different transformers to different column subsets.
+//! - [`FeatureUnion`] applies every transformer to the full input and concatenates outputs.
 //! - [`DataFrameTransformer`] is a trait alias for type erasure.
 
 pub mod column_transformer;
+pub mod feature_union;
 
 pub use column_transformer::ColumnTransformer;
+pub use feature_union::FeatureUnion;
 
 use crate::traits::{Error, Fit, Result, Transform};
 use polars::prelude::*;
 
-/// Trait alias for [`Box<dyn ...>`](Box) type erasure in [`Pipeline`] and [`ColumnTransformer`].
+/// Trait alias for [`Box<dyn ...>`](Box) type erasure in [`Pipeline`],
+/// [`ColumnTransformer`] and [`FeatureUnion`].
 ///
 /// Automatically implemented for any type that satisfies both
 /// [`Fit<DataFrame, Output = ()>`](crate::traits::Fit) and
