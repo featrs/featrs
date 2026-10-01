@@ -32,6 +32,16 @@ impl<T> DataFrameTransformer for T where
 /// sequentially (passing each step's output into the next). Calling
 /// `transform(X)` passes data through every step.
 ///
+/// # Validation
+///
+/// Both `fit` and `transform` reject a `DataFrame` with 0 rows
+/// ([`Error::InvalidInput`]) — the same policy [`ColumnTransformer`] applies.
+/// `fit` rejects an empty step list in [`Pipeline::new`]. There is no
+/// column-count requirement: a step that needs columns of its own reports that
+/// itself. Because the row check runs in `transform` too, a step that drops
+/// every row makes a nested `Pipeline` downstream of it fail rather than pass an
+/// empty frame along; no transformer in this crate drops rows.
+///
 /// # Example
 ///
 /// ```rust
@@ -83,6 +93,18 @@ impl Pipeline {
     }
 }
 
+/// Shared empty-frame policy for the composition layer: `fit` and `transform`
+/// both reject a frame with 0 rows, in [`Pipeline`] and `ColumnTransformer`
+/// alike. Column-count emptiness is checked separately where it applies.
+pub(crate) fn ensure_non_empty_rows(x: &DataFrame, who: &str) -> Result<()> {
+    if x.height() == 0 {
+        return Err(Error::InvalidInput(format!(
+            "{who} received a DataFrame with 0 rows."
+        )));
+    }
+    Ok(())
+}
+
 fn wrap_step_error(e: Error, i: usize, name: &str, phase: &str) -> Error {
     let msg = format!(
         "Pipeline: step {} ('{}') failed during {}: {}",
@@ -100,11 +122,7 @@ impl Fit<DataFrame> for Pipeline {
 
     fn fit(&mut self, x: DataFrame) -> Result<()> {
         self.fitted = false;
-        if x.height() == 0 {
-            return Err(Error::InvalidInput(
-                "Pipeline.fit received a DataFrame with 0 rows.".into(),
-            ));
-        }
+        ensure_non_empty_rows(&x, "Pipeline.fit")?;
         let mut x_curr = x;
         let n = self.steps.len();
         for (i, (name, transformer)) in self.steps.iter_mut().enumerate() {
@@ -134,6 +152,7 @@ impl Transform<DataFrame> for Pipeline {
                     .into(),
             ));
         }
+        ensure_non_empty_rows(&x, "Pipeline.transform")?;
         let mut x_curr = x;
         for (i, (name, transformer)) in self.steps.iter().enumerate() {
             x_curr = transformer
@@ -233,6 +252,23 @@ mod tests {
             matches!(err, Error::InvalidInput(_)),
             "expected InvalidInput, got {err:?}",
         );
+    }
+
+    #[test]
+    fn test_pipeline_transform_rejects_zero_row_frame() {
+        // `fit` rejects a 0-row frame but `transform` happily runs each step on
+        // one, so the same degenerate input behaves differently per phase.
+        let scaler = StandardScaler::new();
+        let mut pipeline = Pipeline::new(vec![("scaler".into(), Box::new(scaler))]).unwrap();
+        let df = make_test_df();
+        pipeline.fit(df.clone()).unwrap();
+
+        let err = pipeline.transform(df.head(Some(0))).unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidInput(_)),
+            "expected InvalidInput, got {err:?}",
+        );
+        assert!(err.to_string().contains("0 rows"), "{err}");
     }
 
     #[test]
