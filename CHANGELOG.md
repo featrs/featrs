@@ -92,6 +92,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `Pipeline` and `ColumnTransformer` (`src/pipeline/`) now validate the same
+  way in both phases. `Pipeline::transform` and `ColumnTransformer::transform`
+  reject a `DataFrame` with 0 rows, matching what `fit` already did for
+  `Pipeline` and what `ColumnTransformer::fit` now does before its 0-column
+  check (previously a 0-row frame went through every step and came back as an
+  opaque error from the first transformer, or as an empty frame from
+  `Pipeline::transform`). A `ColumnTransformer` whose configuration can never
+  produce output — no transformers with `Remainder::Drop` — is now rejected by
+  `fit` with `Error::InvalidInput` instead of by `transform` with "produced no
+  output columns". Column-name collisions across output sources are detected
+  before stacking and reported as `Error::InvalidInput` naming the column and
+  both sources, rather than surfacing as a raw Polars `hstack` error wrapped in
+  `Error::Computation`; this covers both two transformers emitting the same
+  generated name and a generated name colliding with a remainder-passthrough
+  column (no silent precedence). `ColumnTransformer::new` keeps its signature —
+  configuration is checked at `fit`, not at construction. Valid inputs are
+  unaffected (#150).
+
 - `AutoTypeDetector` (`src/preprocessing/auto_type.rs`) now samples the non-null
   values of every `String` column and classifies it `Numeric` when at least
   `numeric_string_threshold` of them parse as a number or an ISO 8601
