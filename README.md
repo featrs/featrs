@@ -68,6 +68,7 @@ let scaled = scaler.transform(data)?;
 | | `TFIDFVectorizer` | TF-IDF weights from a text column (word counts reweighted by inverse document frequency) |
 | **Pipeline** | `Pipeline` | Sequentially chain multiple transformers |
 | | `ColumnTransformer` | Apply different transformers to different columns |
+| | `FeatureUnion` | Apply every transformer to the full input and concatenate the outputs |
 | **Selection** | `VarianceThreshold` | Remove low-variance features |
 | | `SelectKBest` | Select top-k features by statistical test (ANOVA F) |
 | | `SelectPercentile` | Select the top N% of features by statistical test |
@@ -109,6 +110,35 @@ let ct = ColumnTransformer::new(
     vec![("scale".into(), Box::new(StandardScaler::new()), vec!["feat_a".into()])],
     Remainder::Passthrough,
 );
+```
+
+### FeatureUnion
+
+Every transformer receives the full input and their outputs are concatenated
+horizontally. Transformers that preserve their input column names collide, so
+pair the union with branches that emit distinct columns.
+
+```rust
+use featrs::prelude::*;
+
+let mut union = FeatureUnion::new(vec![
+    (
+        "scaled_a".into(),
+        Box::new(ColumnTransformer::new(
+            vec![("s".into(), Box::new(StandardScaler::new()), vec!["feat_a".into()])],
+            Remainder::Drop,
+        )),
+    ),
+    (
+        "scaled_b".into(),
+        Box::new(ColumnTransformer::new(
+            vec![("s".into(), Box::new(StandardScaler::new()), vec!["feat_b".into()])],
+            Remainder::Drop,
+        )),
+    ),
+])?;
+union.fit(df.clone())?;
+let result = union.transform(df)?;
 ```
 
 ### PolynomialFeatures (builder pattern)
@@ -223,7 +253,7 @@ Work is tracked in [GitHub milestones](https://github.com/featrs/featrs/mileston
 |---|---|---|
 | [v0.4.0](https://github.com/featrs/featrs/milestone/1) | New transformers: scalers, encoders, cleaners | Released (Aug 2026) |
 | [v0.4.1](https://github.com/featrs/featrs/milestone/7) | Correctness fixes for encoders, discretizers, and variance | Released (Sep 2026) |
-| [v0.5.0](https://github.com/featrs/featrs/milestone/2) | Text, time-series, feature selection | Oct 2026 |
+| [v0.5.0](https://github.com/featrs/featrs/milestone/2) | Text, time-series, feature selection | Released (Oct 2026) |
 | [v0.6.0](https://github.com/featrs/featrs/milestone/3) | Pipeline composition & automation (FeatureUnion, AutoPipeline, SchemaValidator) | Nov 2026 |
 | [v0.7.0](https://github.com/featrs/featrs/milestone/4) | Performance workstream (benchmarks, Polars-native kernels, rayon, ahash) + LazyFrame & streaming | Dec 2026 |
 | [v0.8.0](https://github.com/featrs/featrs/milestone/5) | Quality & docs hardening (lints, doc tests) | Dec 2026 |
