@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `AutoScaler` in `src/preprocessing/auto_scaler.rs` picks a scaling strategy
+  per `Float64` column from the column's own statistics instead of making the
+  caller choose between `StandardScaler`, `MinMaxScaler`, `RobustScaler`,
+  `MaxAbsScaler` and `PowerTransformer`. `fit` inspects each column and
+  delegates to a `ColumnTransformer` that runs one chosen scaler per strategy
+  subset, so a frame mixing an outlier-heavy column and a near-Gaussian one is
+  handled in a single pass. The heuristic order is most-specific-first:
+  >50% exact zeros → `MaxAbsScaler`; negligible variance → `MaxAbsScaler` (the
+  only delegate that accepts a constant column); `max|x - median| / IQR > 10` →
+  `RobustScaler`; `|skew| > 1` → `PowerTransformer`; raw kurtosis < 2 →
+  `MinMaxScaler`; otherwise `StandardScaler`. `ScalingStrategy::Auto` is the
+  default and `strategy(...)` forces a single scaler for every column;
+  `chosen_name()` and `column_types()` expose the selection (#86).
+
 ## [0.5.0] - 2026-10-02
 
 ### Added

@@ -35,6 +35,7 @@ let scaled = scaler.transform(data)?;
 | | `MinMaxScaler` | Scale to `[0, 1]` or custom range |
 | | `RobustScaler` | Scale using median and IQR (outlier-robust) |
 | | `MaxAbsScaler` | Scale by maximum absolute value; training values map to `[-1, 1]`, sparsity preserved |
+| | `AutoScaler` | Pick the scaler per column from the column's own statistics (sparsity, outliers, skew, kurtosis) |
 | | `Winsorizer` | Clip extreme values at configurable quantiles (outlier capping) |
 | | `OutlierClipper` | Clip outliers via IQR, Z-score, or MAD statistical fences |
 | | `KBinsDiscretizer` | Bin continuous features into `n_bins` discrete bins (uniform, quantile, or k-means) as ordinal or one-hot |
@@ -85,6 +86,18 @@ use featrs::prelude::*;
 
 let mut scaler = StandardScaler::new();
 scaler.fit(df.clone())?;
+let scaled = scaler.transform(df)?;
+```
+
+### AutoScaler
+
+```rust
+use featrs::prelude::*;
+
+let mut scaler = AutoScaler::new();
+scaler.fit(df.clone())?;
+// Which scaler each Float64 column got, e.g. "StandardScaler+RobustScaler".
+println!("{:?}", scaler.chosen_name());
 let scaled = scaler.transform(df)?;
 ```
 
