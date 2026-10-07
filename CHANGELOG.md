@@ -22,6 +22,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `MinMaxScaler`; otherwise `StandardScaler`. `ScalingStrategy::Auto` is the
   default and `strategy(...)` forces a single scaler for every column;
   `chosen_name()` and `column_types()` expose the selection (#86).
+- `AutoImputer` in `src/preprocessing/auto_imputer.rs` picks an imputation
+  strategy per `Float64` column from the column's missing-value pattern and
+  distribution instead of making the caller choose between `Mean`, `Median`,
+  `MostFrequent` and `Constant`. `fit` skips columns with no missing value,
+  follows `NullColumnBehavior` for an entirely null column (`Drop` by default,
+  plus `Error` and `Fill`), leaves a column at or above
+  `high_null_threshold` (default `0.5`) unchanged, and otherwise picks
+  `Median` when `|skewness| > skew_threshold` (default `1.0`) and `Mean`
+  otherwise. Delegation runs through a `ColumnTransformer` with one
+  `SimpleImputer` per strategy subset, so a frame mixing a near-Gaussian
+  column, a skewed one and a `String` column is handled in a single pass;
+  `force_strategy(...)` replaces the heuristic, and `chosen_name()` and
+  `column_types()` expose the selection (#87).
 
 ## [0.5.0] - 2026-10-02
 
