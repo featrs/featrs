@@ -10,6 +10,11 @@ Feature engineering library for Rust, inspired by scikit-learn.
 
 Built on [Polars](https://pola.rs) — all transformations operate natively on `DataFrame` and preserve column names.
 
+> **Read the write-up:** why a feature engineering API designed for NumPy arrays
+> changes when it moves to named Polars columns, and what `AutoScaler` decides
+> per column, is at
+> [adityavikram.dev/blog/featrs-scikit-learn-for-rust](https://adityavikram.dev/blog/featrs-scikit-learn-for-rust).
+
 ## Installation
 
 ```toml
