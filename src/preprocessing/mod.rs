@@ -4,6 +4,7 @@
 //! that implements [`Fit`](crate::traits::Fit) and [`Transform`](crate::traits::Transform)
 //! and operates on [`DataFrame`](polars::prelude::DataFrame).
 
+pub mod auto_imputer;
 pub mod auto_scaler;
 pub mod auto_type;
 pub mod binarizer;

@@ -65,6 +65,9 @@ pub mod prelude {
     pub use crate::pipeline::FeatureUnion;
     pub use crate::pipeline::Pipeline;
     pub use crate::pipeline::column_transformer::Remainder;
+    pub use crate::preprocessing::auto_imputer::{
+        AutoImputer, ImputationStrategy, NullColumnBehavior,
+    };
     pub use crate::preprocessing::auto_scaler::{AutoScaler, ScalingStrategy};
     pub use crate::preprocessing::auto_type::{AutoTypeDetector, ColumnType};
     pub use crate::preprocessing::binarizer::Binarizer;

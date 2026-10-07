@@ -54,6 +54,7 @@ let scaled = scaler.transform(data)?;
 | | `StringCleaner` | Trim, normalize case, and regex-replace string values |
 | | `RareCategoryGrouper` | Group rare and unseen categories into `"Other"` |
 | **Imputation** | `SimpleImputer` | Fill nulls with mean, median, mode, or constant |
+| | `AutoImputer` | Pick the imputation strategy per column from the column's null fraction and skew |
 | | `MissingIndicator` | Binary columns marking where values were missing |
 | **Feature Generation** | `PolynomialFeatures` | Generate polynomial and interaction features |
 | | `Lagger` | Create lag features for time-series forecasting |
@@ -233,6 +234,18 @@ use featrs::prelude::*;
 let mut fh = FeatureHasher::new(&["user_id", "category"], 100);
 fh.fit(df.clone())?;
 let hashed = fh.transform(df)?;  // 100 hashed columns
+```
+
+### AutoImputer
+
+```rust
+use featrs::prelude::*;
+
+let mut imp = AutoImputer::new();
+imp.fit(df.clone())?;
+// Which strategy each Float64 column got, e.g. "Mean+Median".
+println!("{:?}", imp.chosen_name());
+let filled = imp.transform(df)?;
 ```
 
 ### Missing Indicator
