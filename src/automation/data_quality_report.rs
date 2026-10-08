@@ -148,7 +148,8 @@ pub struct OverallQuality {
     pub overall_null_fraction: f64,
     /// Rows that repeat another row, as Polars' `is_duplicated` marks them:
     /// **every** member of a duplicate group counts, so a group of three
-    /// identical rows contributes three.
+    /// identical rows contributes three. Nulls and `NaN` compare equal here, so
+    /// two rows that are null (or `NaN`) in the same cells are duplicates.
     pub duplicated_rows: u64,
     /// Columns whose values repeat an earlier column's, by name. The earlier
     /// (kept) column is not listed.

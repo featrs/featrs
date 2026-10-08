@@ -23,6 +23,7 @@
 //!
 //! | Module | Description |
 //! |---|---|
+//! | [`automation`] | Data-quality diagnostics: `DataQualityReport` |
 //! | [`prelude`] | Convenient glob-import of the most common types |
 //! | [`preprocessing`] | Scaling, encoding, normalization, imputation, binarization, polynomial features, feature hashing, log transformation, auto-type detection |
 //! | [`pipeline`] | `Pipeline` (sequential), `ColumnTransformer` (per-column transforms) and `FeatureUnion` (parallel transforms) |
