@@ -37,6 +37,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod automation;
 pub mod feature_selection;
 pub mod pipeline;
 pub mod preprocessing;
@@ -52,6 +53,10 @@ pub mod util;
 /// let _scaler = StandardScaler::new();
 /// ```
 pub mod prelude {
+    pub use crate::automation::data_quality_report::{
+        Cardinality, ColumnQualityReport, DataQualityReport, NumericStats, OutlierInfo,
+        OverallQuality, Recommendation, StringStats,
+    };
     pub use crate::feature_selection::CorrelationThreshold;
     pub use crate::feature_selection::MITask;
     pub use crate::feature_selection::MutualInformationSelector;
