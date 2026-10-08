@@ -238,9 +238,11 @@ pub enum Recommendation {
 /// Correlations, dtype-mismatch detection, `Datetime`/`Binary` breakdowns and
 /// `to_json` are out of scope: JSON output waits on an optional `serde` feature
 /// (see issue #28), and the rest add disproportionate code for a first
-/// diagnostic. Imputation advice does not mirror
-/// [`AutoImputer`](crate::preprocessing::auto_imputer::AutoImputer)'s
-/// high-null-fraction skip; every partly-null column gets a strategy. Scaler
+/// diagnostic. Imputation advice covers every partly-null `Float64` or `String`
+/// column; a `Float32`, integer, boolean or datetime column with nulls is left
+/// to the caller, because the crate's only imputer
+/// ([`SimpleImputer`](crate::preprocessing::imputer::SimpleImputer)) accepts
+/// `Float64` alone. Scaler
 /// advice reads the distribution shape only, so a sparse column (more than half
 /// exact zeros) is offered `StandardScaler` where
 /// [`AutoScaler`](crate::preprocessing::auto_scaler::AutoScaler) would pick
@@ -610,7 +612,6 @@ fn outlier_info(vals: &[f64]) -> OutlierInfo {
 /// Mode, mean length and max length of the non-null strings.
 fn string_stats(ca: &StringChunked) -> StringStats {
     let mut counts: HashMap<&str, usize> = HashMap::new();
-    let mut best: Option<(&str, usize)> = None;
     let mut total_len = 0usize;
     let mut max_length = 0usize;
     let mut n = 0usize;
@@ -619,17 +620,20 @@ fn string_stats(ca: &StringChunked) -> StringStats {
         n += 1;
         total_len += v.len();
         max_length = max_length.max(v.len());
-        let entry = counts.entry(v).or_insert(0);
-        *entry += 1;
-        // Strictly greater keeps the first value seen on a tie.
-        match best {
-            Some((_, count)) if count >= *entry => {}
-            _ => best = Some((v, *entry)),
-        }
+        *counts.entry(v).or_insert(0) += 1;
     }
 
+    // Ties go to the value seen first, so scan the column in order for the
+    // first value whose count reaches the maximum.
+    let max_count = counts.values().copied().max().unwrap_or(0);
+    let most_frequent = ca
+        .iter()
+        .flatten()
+        .find(|v| counts.get(v) == Some(&max_count))
+        .map(|v| (v.to_string(), max_count));
+
     StringStats {
-        most_frequent: best.map(|(v, count)| (v.to_string(), count)),
+        most_frequent,
         mean_length: if n == 0 {
             0.0
         } else {
@@ -1107,6 +1111,14 @@ mod tests {
         let r = report(&df(vec![scol("s", &["b", "a"])]));
         let s = column(&r, "s").string_stats.as_ref().unwrap();
         assert_eq!(s.most_frequent, Some(("b".to_string(), 1)));
+    }
+
+    #[test]
+    fn test_string_most_frequent_tie_on_max_count_follows_first_appearance() {
+        // Both values reach count 2, but "b" appeared first, so it is the mode.
+        let r = report(&df(vec![scol("s", &["b", "a", "a", "b"])]));
+        let s = column(&r, "s").string_stats.as_ref().unwrap();
+        assert_eq!(s.most_frequent, Some(("b".to_string(), 2)));
     }
 
     #[test]
