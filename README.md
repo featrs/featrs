@@ -82,8 +82,13 @@ let scaled = scaler.transform(data)?;
 | | `CorrelationThreshold` | Drop features highly correlated with others |
 | | `MutualInformationSelector` | Rank/select top-k features by mutual information with the target |
 | **Auto** | `AutoTypeDetector` | Auto-detect column types (incl. numeric-string columns) and apply default transforms |
+| **Diagnostics** | `DataQualityReport` | Summarise nulls, per-column stats and outliers, cardinality, duplicate rows/columns, constant columns, and the preprocessing it recommends |
 
 ## Examples
+
+Every snippet is a fragment: it assumes a `df: DataFrame` is already in scope and
+shows the transformer calls alone. Wrap the body in a function returning
+`Result<_, featrs::traits::Error>` to run it as written.
 
 ### StandardScaler
 
@@ -274,6 +279,26 @@ let mut atd = AutoTypeDetector::new()
     .numeric_string_threshold(0.9); // >= 90% numeric-looking -> passthrough
 atd.fit(df.clone())?;
 let result = atd.transform(df)?;
+```
+
+### Data Quality Report
+
+```rust
+use featrs::prelude::*;
+
+let report = DataQualityReport::from_dataframe(&df)?;
+// Per-column findings and frame-level totals.
+println!("{} nulls in {} cells", report.overall.total_nulls, report.overall.total_cells);
+for r in &report.columns {
+    println!("{}: {:?} cardinality, {} unique", r.name, r.cardinality, r.unique_count);
+}
+// Preprocessing suggestions: DropColumn, ImputeColumn, ScaleColumn, EncodeColumn,
+// RemoveDuplicates (CleanStrings is reserved for a later revision).
+for rec in &report.recommendations {
+    println!("{rec:?}");
+}
+report.print_summary();      // to_markdown() written to stdout
+let md = report.to_markdown();  // GitHub-friendly tables
 ```
 
 ## Roadmap
