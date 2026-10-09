@@ -122,6 +122,14 @@ pub struct ColumnQualityReport {
     /// treats `NaN` as a present value: an all-`NaN` column has
     /// `null_fraction == 0.0` yet holds no usable number.
     pub nan_count: u64,
+    /// Number of `±Inf` values; always `0` for non-float columns.
+    ///
+    /// Like `NaN`, an infinity is a present value in Polars, so it counts
+    /// toward [`non_null_count`](Self::non_null_count) and is excluded from the
+    /// moments. It is reported on its own because an infinity collapses a
+    /// fitted range: a column holding one cannot be scaled by
+    /// `MinMaxScaler`, so the report never offers that scaler for it.
+    pub inf_count: u64,
     /// Distinct **non-null** values.
     ///
     /// Polars counts null as one distinct value, so this subtracts it when the
@@ -197,7 +205,8 @@ pub enum Recommendation {
     /// Normalize the column's strings (trim, case, replacements).
     ///
     /// Reserved for a later revision: the report does not yet inspect string
-    /// content, so this variant is never emitted.
+    /// content, so this variant is never emitted. Callers should treat it as a
+    /// future addition rather than a reachable recommendation.
     CleanStrings {
         /// Column name.
         name: String,
@@ -211,18 +220,20 @@ pub enum Recommendation {
 
 /// Structured quality report for a [`DataFrame`].
 ///
-/// Built in a single pass over the frame by [`from_dataframe`](Self::from_dataframe).
-/// Cost is `O(rows × columns)` plus the pairwise duplicate-column comparison,
-/// which is `O(rows × columns²)` — fine for typical column counts, and the same
-/// bound [`DuplicateColumnRemover`](crate::preprocessing::duplicate_column_remover::DuplicateColumnRemover)
+/// Built by [`from_dataframe`](Self::from_dataframe), which walks the frame
+/// once per column plus a `group_by` for the duplicated-row count. Cost is
+/// `O(rows × columns)` plus the pairwise duplicate-column comparison, which is
+/// `O(rows × columns²)` — fine for typical column counts, and the same bound
+/// [`DuplicateColumnRemover`](crate::preprocessing::duplicate_column_remover::DuplicateColumnRemover)
 /// uses.
 ///
-/// # Nulls and `NaN`
+/// # Nulls, `NaN` and `±Inf`
 ///
 /// `NaN` is a *present* value in Polars, so it counts toward `non_null_count`
 /// but not toward `null_count`; [`ColumnQualityReport::nan_count`] reports it
-/// separately. NaN and `±Inf` are left out of [`NumericStats`] and
-/// [`OutlierInfo`].
+/// separately, and [`ColumnQualityReport::inf_count`] does the same for `±Inf`.
+/// `NaN` and `±Inf` are left out of [`NumericStats`] and [`OutlierInfo`], and a
+/// column holding an infinity is never offered `MinMaxScaler`.
 ///
 /// Numeric summaries are built for `Float64` columns only, matching
 /// [`SimpleImputer`](crate::preprocessing::imputer::SimpleImputer) and
@@ -238,8 +249,9 @@ pub enum Recommendation {
 /// Correlations, dtype-mismatch detection, `Datetime`/`Binary` breakdowns and
 /// `to_json` are out of scope: JSON output waits on an optional `serde` feature
 /// (see issue #28), and the rest add disproportionate code for a first
-/// diagnostic. Imputation advice covers every partly-null `Float64` or `String`
-/// column; a `Float32`, integer, boolean or datetime column with nulls is left
+/// diagnostic. Imputation advice covers every partly-null `String` column and
+/// every `Float64` column with a usable finite summary; a `Float32`, integer,
+/// boolean or datetime column with nulls is left
 /// to the caller, because the crate's only imputer
 /// ([`SimpleImputer`](crate::preprocessing::imputer::SimpleImputer)) accepts
 /// `Float64` alone. Scaler
@@ -311,9 +323,8 @@ impl DataQualityReport {
         let cols = df.columns();
         for (i, col) in cols.iter().enumerate() {
             // Compare against every earlier column, not just the survivors:
-            // strict (null-aware) equality is transitive, but scanning all
-            // earlier columns keeps the rule identical to the permissive case
-            // used by `DuplicateColumnRemover`.
+            // this report uses the strict (null-aware) equality mode, where a
+            // non-transitive chain cannot wrongly keep a later duplicate.
             if cols[..i]
                 .iter()
                 .any(|earlier| is_duplicate_of(col, earlier))
@@ -470,6 +481,7 @@ fn inspect_column(col: &Column, height: usize) -> Result<ColumnQualityReport> {
         null_count,
         null_fraction: null_count as f64 / height as f64,
         nan_count: 0,
+        inf_count: 0,
         unique_count,
         cardinality: cardinality_of(unique_count),
         statistics: None,
@@ -486,14 +498,18 @@ fn inspect_column(col: &Column, height: usize) -> Result<ColumnQualityReport> {
         })?;
         let mut vals: Vec<f64> = Vec::with_capacity(ca.len());
         let mut nan_count = 0u64;
+        let mut inf_count = 0u64;
         for v in ca.iter().flatten() {
             if v.is_nan() {
                 nan_count += 1;
-            } else if v.is_finite() {
+            } else if v.is_infinite() {
+                inf_count += 1;
+            } else {
                 vals.push(v);
             }
         }
         report.nan_count = nan_count;
+        report.inf_count = inf_count;
 
         if !vals.is_empty() {
             report.statistics = Some(numeric_stats(&vals));
@@ -538,10 +554,16 @@ fn numeric_stats(vals: &[f64]) -> NumericStats {
     // The standardized moments divide by a power of the standard deviation, so
     // they are undefined for a constant column (and for magnitudes that
     // overflow the second moment) — report NaN rather than a fake 0.
+    //
+    // Each deviation is divided by the standard deviation before being raised
+    // to its power, the same way `AutoImputer::skewness` does it: the raw third
+    // and fourth moments overflow to `Inf` for large-but-finite values, and
+    // `Inf / Inf` would collapse a perfectly measurable skew to `NaN`.
     let (skew, kurtosis) = if variance > 0.0 && variance.is_finite() {
-        let m3 = vals.iter().map(|v| (v - mean).powi(3)).sum::<f64>() / n;
-        let m4 = vals.iter().map(|v| (v - mean).powi(4)).sum::<f64>() / n;
-        (m3 / variance.sqrt().powi(3), m4 / (variance * variance))
+        let sd = variance.sqrt();
+        let skew = vals.iter().map(|v| ((v - mean) / sd).powi(3)).sum::<f64>() / n;
+        let kurtosis = vals.iter().map(|v| ((v - mean) / sd).powi(4)).sum::<f64>() / n;
+        (skew, kurtosis)
     } else {
         (f64::NAN, f64::NAN)
     };
@@ -714,10 +736,13 @@ fn build_recommendations(
         if dropped.contains(&c.name.as_str()) || c.dtype != DataType::String {
             continue;
         }
+        // A high-cardinality string is hashed by this crate's own detector
+        // (`AutoTypeDetector` maps `HighCardinality` to `FeatureHasher`); a
+        // label encoding would just print an integer per distinct value.
         let encoder = if c.cardinality == Cardinality::Low {
             "OneHotEncoder"
         } else {
-            "LabelEncoder"
+            "FeatureHasher"
         };
         out.push(Recommendation::EncodeColumn {
             name: c.name.clone(),
@@ -771,7 +796,10 @@ fn scaling_advice(c: &ColumnQualityReport) -> Option<&'static str> {
     if stats.skew.abs() > 1.0 {
         return Some("PowerTransformer");
     }
-    if stats.kurtosis < 2.0 {
+    // `MinMaxScaler` fits its range on every non-`NaN` value, so a single `±Inf`
+    // collapses the range and maps the whole column to `NaN`. No other scaler
+    // has that weakness, so a column holding an infinity never gets it.
+    if stats.kurtosis < 2.0 && c.inf_count == 0 {
         return Some("MinMaxScaler");
     }
     Some("StandardScaler")
@@ -808,6 +836,9 @@ fn describe_statistics(c: &ColumnQualityReport) -> String {
     }
     if c.nan_count > 0 {
         parts.push(format!("NaN={}", c.nan_count));
+    }
+    if c.inf_count > 0 {
+        parts.push(format!("Inf={}", c.inf_count));
     }
     parts.join("; ")
 }
@@ -996,6 +1027,90 @@ mod tests {
     }
 
     #[test]
+    fn test_infinite_values_are_counted_separately() {
+        let x = Column::from(Series::new(
+            "x".into(),
+            &[
+                Some(1.0_f64),
+                Some(f64::INFINITY),
+                Some(f64::NEG_INFINITY),
+                None,
+            ],
+        ));
+        let r = report(&df(vec![x]));
+        let c = column(&r, "x");
+        assert_eq!(c.null_count, 1);
+        assert_eq!(c.nan_count, 0);
+        assert_eq!(c.inf_count, 2);
+        // Only the finite value feeds the moments.
+        assert_eq!(c.statistics.as_ref().unwrap().mean, 1.0);
+    }
+
+    #[test]
+    fn test_all_infinite_column_reports_no_statistics() {
+        let x = Column::from(Series::new("x".into(), &[f64::INFINITY, f64::NEG_INFINITY]));
+        let r = report(&df(vec![x]));
+        let c = column(&r, "x");
+        assert_eq!(c.inf_count, 2);
+        assert!(c.statistics.is_none());
+        assert!(c.outliers.is_none());
+    }
+
+    #[test]
+    fn test_infinite_column_is_not_offered_minmax_scaler() {
+        // `MinMaxScaler` fits its range on non-NaN values, so an infinity
+        // collapses the range and maps every value to NaN.
+        let vals = [1.0_f64, 2.0, 3.0, 4.0, f64::INFINITY];
+        let r = report(&df(vec![col("x", &vals)]));
+        assert!(!r.recommendations.iter().any(|x| matches!(
+            x,
+            Recommendation::ScaleColumn { suggested_scaler, .. } if suggested_scaler == "MinMaxScaler"
+        )));
+    }
+
+    #[test]
+    fn test_overflowing_third_moment_still_yields_finite_skew() {
+        // |x| ~ 1e150 keeps the variance finite but overflows the raw third
+        // moment to inf; dividing by the standard deviation before cubing keeps
+        // the moment exact.
+        let vals = [1e150_f64, 2e150, 3e150, 4e150, 5e150, 6e150];
+        let r = report(&df(vec![col("x", &vals)]));
+        let c = column(&r, "x");
+        let s = c.statistics.as_ref().unwrap();
+        assert!(s.skew.is_finite());
+        assert!(s.kurtosis.is_finite());
+        // The moments are usable, so the shape tests run: an overflowing but
+        // finite column must not fall through to the overflow sentinel.
+        assert!(
+            !r.recommendations.iter().any(|x| matches!(
+                x,
+                Recommendation::ScaleColumn { suggested_scaler, .. }
+                    if suggested_scaler == "MaxAbsScaler"
+            )),
+            "a finite column with usable moments must not fall through to MaxAbsScaler"
+        );
+    }
+
+    #[test]
+    fn test_skewed_column_with_overflowing_moment_advises_median() {
+        // Mostly one value with a single large one: right-skewed (skew > 1) and
+        // large enough that the raw third moment overflows.
+        let mut vals: Vec<Option<f64>> = [1e150_f64, 1e150, 1e150, 1e150, 1e150, 1e151]
+            .into_iter()
+            .map(Some)
+            .collect();
+        vals.push(None);
+        let x = Column::from(Series::new("x".into(), vals));
+        let r = report(&df(vec![x]));
+        let s = column(&r, "x").statistics.as_ref().unwrap();
+        assert!(s.skew.abs() > 1.0, "skew should be measurable: {}", s.skew);
+        assert!(r.recommendations.iter().any(|x| matches!(
+            x,
+            Recommendation::ImputeColumn { suggested_strategy, .. } if suggested_strategy == "Median"
+        )));
+    }
+
+    #[test]
     fn test_all_nan_column_has_no_statistics() {
         let x = Column::from(Series::new("x".into(), &[f64::NAN, f64::NAN]));
         let r = report(&df(vec![x]));
@@ -1175,13 +1290,13 @@ mod tests {
     }
 
     #[test]
-    fn test_high_cardinality_string_recommends_label_encoder() {
+    fn test_high_cardinality_string_recommends_feature_hasher() {
         let vals: Vec<String> = (0..1000).map(|v| format!("c{v}")).collect();
         let refs: Vec<&str> = vals.iter().map(|s| s.as_str()).collect();
         let r = report(&df(vec![scol("cat", &refs)]));
         assert!(r.recommendations.iter().any(|x| matches!(
             x,
-            Recommendation::EncodeColumn { suggested_encoder, .. } if suggested_encoder == "LabelEncoder"
+            Recommendation::EncodeColumn { suggested_encoder, .. } if suggested_encoder == "FeatureHasher"
         )));
     }
 

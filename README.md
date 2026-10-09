@@ -86,6 +86,10 @@ let scaled = scaler.transform(data)?;
 
 ## Examples
 
+Every snippet is a fragment: it assumes a `df: DataFrame` is already in scope and
+shows the transformer calls alone. Wrap the body in a function returning
+`Result<_, featrs::traits::Error>` to run it as written.
+
 ### StandardScaler
 
 ```rust
@@ -289,7 +293,7 @@ for r in &report.columns {
     println!("{}: {:?} cardinality, {} unique", r.name, r.cardinality, r.unique_count);
 }
 // Preprocessing suggestions: DropColumn, ImputeColumn, ScaleColumn, EncodeColumn,
-// CleanStrings, RemoveDuplicates.
+// RemoveDuplicates (CleanStrings is reserved for a later revision).
 for rec in &report.recommendations {
     println!("{rec:?}");
 }
