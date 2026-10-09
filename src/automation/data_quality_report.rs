@@ -249,10 +249,9 @@ pub enum Recommendation {
 /// Correlations, dtype-mismatch detection, `Datetime`/`Binary` breakdowns and
 /// `to_json` are out of scope: JSON output waits on an optional `serde` feature
 /// (see issue #28), and the rest add disproportionate code for a first
-/// diagnostic. Imputation advice covers every partly-null `String` column and
-/// every `Float64` column with a usable finite summary; a `Float32`, integer,
-/// boolean or datetime column with nulls is left
-/// to the caller, because the crate's only imputer
+/// diagnostic. Imputation advice covers every `Float64` column with a usable
+/// finite summary; a `Float32`, integer, boolean, datetime or `String` column
+/// with nulls is left to the caller, because the crate's only imputer
 /// ([`SimpleImputer`](crate::preprocessing::imputer::SimpleImputer)) accepts
 /// `Float64` alone. Scaler
 /// advice reads the distribution shape only, so a sparse column (more than half
@@ -709,9 +708,9 @@ fn build_recommendations(
         let strategy = match &c.statistics {
             Some(s) if s.skew.abs() > 1.0 => "Median",
             Some(_) => "Mean",
-            // Non-float columns: a string column's missing values are still
-            // missing, and `MostFrequent` is the only strategy that applies.
-            None if c.dtype == DataType::String => "MostFrequent",
+            // No numeric summary: the column is non-`Float64` (or all-`±Inf`).
+            // `SimpleImputer` accepts `Float64` alone, so there is no crate
+            // imputer to name here and the caller fills it.
             None => continue,
         };
         out.push(Recommendation::ImputeColumn {
