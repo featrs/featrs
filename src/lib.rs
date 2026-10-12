@@ -23,6 +23,7 @@
 //!
 //! | Module | Description |
 //! |---|---|
+//! | [`automation`] | Data-quality diagnostics: `DataQualityReport` |
 //! | [`prelude`] | Convenient glob-import of the most common types |
 //! | [`preprocessing`] | Scaling, encoding, normalization, imputation, binarization, polynomial features, feature hashing, log transformation, auto-type detection |
 //! | [`pipeline`] | `Pipeline` (sequential), `ColumnTransformer` (per-column transforms) and `FeatureUnion` (parallel transforms) |
@@ -37,6 +38,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod automation;
 pub mod feature_selection;
 pub mod pipeline;
 pub mod preprocessing;
@@ -52,6 +54,10 @@ pub mod util;
 /// let _scaler = StandardScaler::new();
 /// ```
 pub mod prelude {
+    pub use crate::automation::data_quality_report::{
+        Cardinality, ColumnQualityReport, DataQualityReport, NumericStats, OutlierInfo,
+        OverallQuality, Recommendation, StringStats,
+    };
     pub use crate::feature_selection::CorrelationThreshold;
     pub use crate::feature_selection::MITask;
     pub use crate::feature_selection::MutualInformationSelector;

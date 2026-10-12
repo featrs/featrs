@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `DataQualityReport` in `src/automation/data_quality_report.rs` summarises a
+  frame before modelling: per-column nulls, `NaN` and `±Inf` counts, unique
+  counts and cardinality buckets, `Float64` moments
+  (mean/std/min/max/median/skew/kurtosis), IQR, Z-score and MAD outlier counts,
+  string length and mode stats, plus frame-level duplicated rows, duplicated
+  columns and constant columns. It also emits `Recommendation`s (drop, impute,
+  scale, encode, remove duplicates) so `AutoPipeline` can consume the same
+  heuristics. Diagnostic, not a transformer: no fitted state, the input frame is
+  never modified. `print_summary` and `to_markdown` render the report; `to_json`
+  waits on the optional `serde` feature (issue #28).
 - `AutoScaler` in `src/preprocessing/auto_scaler.rs` picks a scaling strategy
   per `Float64` column from the column's own statistics instead of making the
   caller choose between `StandardScaler`, `MinMaxScaler`, `RobustScaler`,
