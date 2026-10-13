@@ -120,45 +120,49 @@ impl Fit<DataFrame> for StandardScaler {
                 )));
             }
 
-            let fitted_mean = vals.iter().sum::<f64>() / vals.len() as f64;
-            if !fitted_mean.is_finite() {
-                return Err(Error::InvalidInput(format!(
-                    "StandardScaler: column '{}' mean overflowed or is not finite. \
-                     Input values are too large for f64 computation.",
-                    name
-                )));
-            }
-            let col_mean = if self.with_mean { fitted_mean } else { 0.0 };
-
-            let col_std = if self.with_std {
-                let var =
-                    vals.iter().map(|v| (v - fitted_mean).powi(2)).sum::<f64>() / vals.len() as f64;
-                if !var.is_finite() || var < 0.0 {
+            let (col_mean, col_std) = if self.with_mean || self.with_std {
+                let fitted_mean = vals.iter().sum::<f64>() / vals.len() as f64;
+                if !fitted_mean.is_finite() {
                     return Err(Error::InvalidInput(format!(
-                        "StandardScaler: column '{}' variance overflowed or is not finite. \
+                        "StandardScaler: column '{}' mean overflowed or is not finite. \
                          Input values are too large for f64 computation.",
                         name
                     )));
                 }
-                let std = var.sqrt();
-                if !std.is_finite() {
-                    return Err(Error::InvalidInput(format!(
-                        "StandardScaler: column '{}' standard deviation overflowed or is not finite.",
-                        name
-                    )));
-                }
-                std
-            } else {
-                1.0
-            };
+                let mean = if self.with_mean { fitted_mean } else { 0.0 };
 
-            if col_std < f64::EPSILON {
-                return Err(Error::Computation(format!(
-                    "StandardScaler: column '{}' has zero variance. \
-                     Try removing it with VarianceThreshold or setting with_std(false).",
-                    name
-                )));
-            }
+                let std = if self.with_std {
+                    let var = vals.iter().map(|v| (v - fitted_mean).powi(2)).sum::<f64>()
+                        / vals.len() as f64;
+                    if !var.is_finite() || var < 0.0 {
+                        return Err(Error::InvalidInput(format!(
+                            "StandardScaler: column '{}' variance overflowed or is not finite. \
+                             Input values are too large for f64 computation.",
+                            name
+                        )));
+                    }
+                    let s = var.sqrt();
+                    if !s.is_finite() {
+                        return Err(Error::InvalidInput(format!(
+                            "StandardScaler: column '{}' standard deviation overflowed or is not finite.",
+                            name
+                        )));
+                    }
+                    if s < f64::EPSILON {
+                        return Err(Error::Computation(format!(
+                            "StandardScaler: column '{}' has zero variance. \
+                             Try removing it with VarianceThreshold or setting with_std(false).",
+                            name
+                        )));
+                    }
+                    s
+                } else {
+                    1.0
+                };
+                (mean, std)
+            } else {
+                (0.0, 1.0)
+            };
 
             params.push(ScaleParam {
                 name: name.clone(),
@@ -493,7 +497,22 @@ impl Fit<DataFrame> for RobustScaler {
             let q3 = percentile_sorted(&vals, 75.0);
             let iqr = q3 - q1;
 
-            if iqr < f64::EPSILON {
+            if self.with_centering && !median.is_finite() {
+                return Err(Error::InvalidInput(format!(
+                    "RobustScaler: column '{}' median is not finite.",
+                    name
+                )));
+            }
+
+            if self.with_scaling && !iqr.is_finite() {
+                return Err(Error::InvalidInput(format!(
+                    "RobustScaler: column '{}' IQR overflowed or is not finite. \
+                     Input values are too large for f64 computation.",
+                    name
+                )));
+            }
+
+            if self.with_scaling && iqr < f64::EPSILON {
                 return Err(Error::Computation(format!(
                     "RobustScaler: column '{}' has zero IQR (Q1=Q3={}). \
                      All values are the same. Remove the column or use a different scaler.",
@@ -823,6 +842,70 @@ mod tests {
         assert!(
             fit_result.is_err(),
             "StandardScaler on 1e300 magnitude data must error on variance overflow"
+        );
+    }
+
+    /// When both with_mean and with_std are disabled, StandardScaler is an identity
+    /// operation and must not fail on extreme magnitude data where mean would overflow.
+    #[test]
+    fn test_standard_scaler_disabled_mean_and_std_extreme_magnitude_ok() {
+        let x = Column::from(Series::new(
+            "x".into(),
+            &[1e300_f64, 2e300, 3e300, 4e300, 5e300],
+        ));
+        let df = DataFrame::new(5, vec![x]).unwrap();
+        let mut scaler = StandardScaler::new().with_mean(false).with_std(false);
+        assert!(scaler.fit(df.clone()).is_ok());
+        let res = scaler.transform(df).unwrap();
+        let vals: Vec<f64> = res
+            .column("x")
+            .unwrap()
+            .f64()
+            .unwrap()
+            .into_no_null_iter()
+            .collect();
+        assert_eq!(vals, vec![1e300, 2e300, 3e300, 4e300, 5e300]);
+    }
+
+    /// RobustScaler on extreme magnitude data (~1e300) operates via median and IQR
+    /// without squaring, so it scales stably without overflowing.
+    #[test]
+    fn test_robust_scaler_extreme_magnitude_scales_ok() {
+        let x = Column::from(Series::new(
+            "x".into(),
+            &[1e300_f64, 2e300, 3e300, 4e300, 5e300],
+        ));
+        let df = DataFrame::new(5, vec![x]).unwrap();
+        let mut scaler = RobustScaler::new();
+        assert!(scaler.fit(df.clone()).is_ok());
+        let res = scaler.transform(df).unwrap();
+        let vals: Vec<f64> = res
+            .column("x")
+            .unwrap()
+            .f64()
+            .unwrap()
+            .into_no_null_iter()
+            .collect();
+        assert_relative_eq!(vals[0], -1.0, epsilon = 1e-6);
+        assert_relative_eq!(vals[1], -0.5, epsilon = 1e-6);
+        assert_relative_eq!(vals[2], 0.0, epsilon = 1e-6);
+        assert_relative_eq!(vals[3], 0.5, epsilon = 1e-6);
+        assert_relative_eq!(vals[4], 1.0, epsilon = 1e-6);
+    }
+
+    /// RobustScaler must reject columns where IQR computation overflows f64.
+    #[test]
+    fn test_robust_scaler_iqr_overflow_error() {
+        let x = Column::from(Series::new(
+            "x".into(),
+            &[-1.5e308_f64, -1.5e308, 1.5e308, 1.5e308],
+        ));
+        let df = DataFrame::new(4, vec![x]).unwrap();
+        let mut scaler = RobustScaler::new();
+        let fit_result = scaler.fit(df);
+        assert!(
+            fit_result.is_err(),
+            "RobustScaler on overflowing IQR data must error"
         );
     }
 }
