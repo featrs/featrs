@@ -178,9 +178,11 @@ use featrs::prelude::*;
 use featrs::pipeline::conditional_pipeline::ColumnPredicate;
 
 let mut cp = ConditionalPipeline::new()
+    // Rules are tried in this order, so the name rule has to come before
+    // `IsString` to claim `user_id` on a string column.
+    .rule(ColumnPredicate::NameMatches(".*_id$".into()), Box::new(FeatureHasher::new(&["user_id"], 16)))
     .rule(ColumnPredicate::IsFloat64, Box::new(StandardScaler::new()))
     .rule(ColumnPredicate::IsString, Box::new(OneHotEncoder::new()))
-    .rule(ColumnPredicate::NameMatches(".*_id$".into()), Box::new(FeatureHasher::new(&["user_id"], 16)))
     .fallback(Box::new(MissingIndicator::all()));
 cp.fit(df.clone())?;
 let routed = cp.transform(df)?;
