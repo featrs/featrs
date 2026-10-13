@@ -112,6 +112,11 @@ impl Fit<DataFrame> for MaxAbsScaler {
             }
 
             let col_max_abs = vals.iter().fold(0.0f64, |acc, v| acc.max(v.abs()));
+            if !col_max_abs.is_finite() {
+                return Err(Error::InvalidInput(format!(
+                    "MaxAbsScaler: column '{name}' max absolute value is not finite."
+                )));
+            }
 
             max_abs.push(col_max_abs);
         }
@@ -507,5 +512,21 @@ mod tests {
 
         let v = out.column("x").unwrap().f64().unwrap().get(0).unwrap();
         assert_relative_eq!(v, 2.0, epsilon = 1e-12);
+    }
+
+    /// MaxAbsScaler on extreme magnitude data (~1e300) operates via absolute maximum
+    /// without squaring, so it scales stably without overflowing.
+    #[test]
+    fn test_max_abs_scaler_extreme_magnitude_scales_ok() {
+        let col = Column::from(Series::new("x".into(), &[1e300_f64, 5e300]));
+        let df = DataFrame::new(2, vec![col]).unwrap();
+
+        let mut scaler = MaxAbsScaler::new();
+        scaler.fit(df.clone()).unwrap();
+        let out = scaler.transform(df).unwrap();
+
+        let s = out.column("x").unwrap().f64().unwrap();
+        assert_relative_eq!(s.get(0).unwrap(), 0.2, epsilon = 1e-12);
+        assert_relative_eq!(s.get(1).unwrap(), 1.0, epsilon = 1e-12);
     }
 }
