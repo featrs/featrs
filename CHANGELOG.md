@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `ConditionalPipeline` in `src/pipeline/conditional_pipeline.rs` routes each
+  column to a transformer by [`ColumnPredicate`]: dtype (`IsFloat64`, `IsInt`,
+  `IsString`, `IsDatetime`, `IsBoolean`), a regex on the column name
+  (`NameMatches`), or a user closure (`Custom`). Rules are tried in declaration
+  order and the first match claims the column, so a column is transformed once
+  and never duplicated; columns no rule claims go to the optional `fallback`
+  transformer or are dropped. Each transformer receives only its own columns.
 - `DataQualityReport` in `src/automation/data_quality_report.rs` summarises a
   frame before modelling: per-column nulls, `NaN` and `±Inf` counts, unique
   counts and cardinality buckets, `Float64` moments
