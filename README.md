@@ -76,6 +76,7 @@ let scaled = scaler.transform(data)?;
 | **Pipeline** | `Pipeline` | Sequentially chain multiple transformers |
 | | `ColumnTransformer` | Apply different transformers to different columns |
 | | `FeatureUnion` | Apply every transformer to the full input and concatenate the outputs |
+| | `ConditionalPipeline` | Route each column to a transformer by dtype, name pattern, or custom predicate |
 | **Selection** | `VarianceThreshold` | Remove low-variance features |
 | | `SelectKBest` | Select top-k features by statistical test (ANOVA F) |
 | | `SelectPercentile` | Select the top N% of features by statistical test |
@@ -164,6 +165,34 @@ let mut union = FeatureUnion::new(vec![
 union.fit(df.clone())?;
 let result = union.transform(df)?;
 ```
+
+### ConditionalPipeline
+
+Instead of naming the columns each transformer receives, supply rules.
+Every column goes to the first rule that matches it, so a column is
+transformed once and never duplicated. Columns no rule matches go to the
+optional `fallback` and are dropped without one.
+
+```rust
+use featrs::prelude::*;
+use featrs::pipeline::conditional_pipeline::ColumnPredicate;
+
+let mut cp = ConditionalPipeline::new()
+    .rule(ColumnPredicate::IsFloat64, Box::new(StandardScaler::new()))
+    .rule(ColumnPredicate::IsString, Box::new(OneHotEncoder::new()))
+    .rule(ColumnPredicate::NameMatches(".*_id$".into()), Box::new(FeatureHasher::new(&["user_id"], 16)))
+    .fallback(Box::new(MissingIndicator::all()));
+cp.fit(df.clone())?;
+let routed = cp.transform(df)?;
+// Which transformer claimed which column, in frame order.
+for (column, label) in cp.assignments().unwrap_or(&[]) {
+    println!("{column} -> {label}");
+}
+```
+
+`ColumnPredicate::Custom` takes a `Fn(&Column) -> bool + Send + Sync` closure,
+so data-dependent routing (cardinality, null fraction) works too. The closure
+runs before any transformer and must not panic.
 
 ### PolynomialFeatures (builder pattern)
 

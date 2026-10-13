@@ -26,7 +26,7 @@
 //! | [`automation`] | Data-quality diagnostics: `DataQualityReport` |
 //! | [`prelude`] | Convenient glob-import of the most common types |
 //! | [`preprocessing`] | Scaling, encoding, normalization, imputation, binarization, polynomial features, feature hashing, log transformation, auto-type detection |
-//! | [`pipeline`] | `Pipeline` (sequential), `ColumnTransformer` (per-column transforms) and `FeatureUnion` (parallel transforms) |
+//! | [`pipeline`] | `Pipeline` (sequential), `ColumnTransformer` (per-column transforms), `FeatureUnion` (parallel transforms) and `ConditionalPipeline` (predicate-routed columns) |
 //! | [`feature_selection`] | `VarianceThreshold`, `SelectKBest`, `SelectPercentile`, `MutualInformationSelector`, `CorrelationThreshold` |
 //! | [`traits`] | Core `Fit`, `Transform`, `FitTransform` traits and error types |
 //! | [`time_series`] | Lag features, rolling windows, difference, cyclical encoding |
@@ -67,6 +67,7 @@ pub mod prelude {
     pub use crate::feature_selection::select_kbest::FClassif;
     pub use crate::feature_selection::select_kbest::FRegression;
     pub use crate::pipeline::ColumnTransformer;
+    pub use crate::pipeline::ConditionalPipeline;
     pub use crate::pipeline::DataFrameTransformer;
     pub use crate::pipeline::FeatureUnion;
     pub use crate::pipeline::Pipeline;
