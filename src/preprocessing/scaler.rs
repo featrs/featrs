@@ -121,12 +121,33 @@ impl Fit<DataFrame> for StandardScaler {
             }
 
             let fitted_mean = vals.iter().sum::<f64>() / vals.len() as f64;
+            if !fitted_mean.is_finite() {
+                return Err(Error::InvalidInput(format!(
+                    "StandardScaler: column '{}' mean overflowed or is not finite. \
+                     Input values are too large for f64 computation.",
+                    name
+                )));
+            }
             let col_mean = if self.with_mean { fitted_mean } else { 0.0 };
 
             let col_std = if self.with_std {
                 let var =
                     vals.iter().map(|v| (v - fitted_mean).powi(2)).sum::<f64>() / vals.len() as f64;
-                var.sqrt()
+                if !var.is_finite() || var < 0.0 {
+                    return Err(Error::InvalidInput(format!(
+                        "StandardScaler: column '{}' variance overflowed or is not finite. \
+                         Input values are too large for f64 computation.",
+                        name
+                    )));
+                }
+                let std = var.sqrt();
+                if !std.is_finite() {
+                    return Err(Error::InvalidInput(format!(
+                        "StandardScaler: column '{}' standard deviation overflowed or is not finite.",
+                        name
+                    )));
+                }
+                std
             } else {
                 1.0
             };
@@ -785,5 +806,23 @@ mod tests {
             "NaN input must map to NaN through transform"
         );
         assert_relative_eq!(vals[2].unwrap(), 1.0, epsilon = 1e-6);
+    }
+
+    /// Regression for #181: extreme magnitude values (~1e300) must error
+    /// on fit due to variance overflow, instead of silently producing
+    /// infinite std which maps all features to +/-0.0 during transform.
+    #[test]
+    fn test_standard_scaler_extreme_magnitude_overflow_error() {
+        let x = Column::from(Series::new(
+            "x".into(),
+            &[1e300_f64, 2e300, 3e300, 4e300, 5e300],
+        ));
+        let df = DataFrame::new(5, vec![x]).unwrap();
+        let mut scaler = StandardScaler::new();
+        let fit_result = scaler.fit(df);
+        assert!(
+            fit_result.is_err(),
+            "StandardScaler on 1e300 magnitude data must error on variance overflow"
+        );
     }
 }
