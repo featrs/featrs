@@ -211,8 +211,12 @@ fn cache_key(x: &DataFrame) -> u64 {
         col.name().hash(&mut hasher);
         // `DataType`'s own `Hash` covers only the variant discriminant, so
         // `Datetime(µs)` and `Datetime(ns)` — or `List(Int64)` and
-        // `List(String)` — would share a key. The `Debug` form spells out the
-        // parameters and covers every case `PartialEq` distinguishes.
+        // `List(String)` — would share a key. The `Debug` form spells out those
+        // parameters, which is what the key needs for everyday columns.
+        // `Enum` and `Object` are the exception: their `Debug` is opaque
+        // (`Enum([...])`, `Object`), so columns using them share the
+        // variant-level key and can only be told apart by the value check that
+        // this key deliberately skips.
         format!("{:?}", col.dtype()).hash(&mut hasher);
     }
     hasher.finish()
