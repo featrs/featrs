@@ -202,8 +202,10 @@ runs before any transformer and must not panic.
 Wraps a `Pipeline` and remembers each step's output, so re-transforming an
 input it has already seen replays the cached frames instead of recomputing
 them. The key is the input's schema (column names + dtypes) plus row count:
-cheap, but blind to value changes that leave the schema alone, so call
-`clear_cache()` after mutating a frame in place. Entries are bounded by
+cheap, but blind to value changes that leave the schema alone, so it cannot tell
+one frame from another of the same shape and height — use it only for repeated
+calls on inputs known to be identical, and call `clear_cache()` before
+transforming a different frame of the same shape. Entries are bounded by
 `max_cache_entries` (default 16, oldest evicted first); `0` disables caching.
 
 ```rust
@@ -221,7 +223,7 @@ let second = cached.transform(df)?;         // replayed from the cache
 assert_eq!(cached.cache_size(), 1);
 assert!(second.equals_missing(&first));
 
-// After an in-place change that keeps the schema, drop the stale entries.
+// Before transforming a different frame of the same shape, drop the stale entries.
 cached.clear_cache();
 ```
 

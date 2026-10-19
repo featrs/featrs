@@ -5,7 +5,10 @@
 //! replays the stored frames instead of re-running the steps. It pays off where
 //! an unchanged early-stage frame goes through the same pipeline many times:
 //! debugging a downstream step, repeated evaluation, or a search over the later
-//! stages of a pipeline.
+//! stages of a pipeline. The reuse only holds when those repeated inputs really
+//! are identical — the cache key is the schema and row count, so a *different*
+//! frame of the same shape hits an existing entry; see the cache-key note on
+//! [`CachedPipeline`].
 //!
 //! - [`CachedPipeline`] — cache each step's output, bounded to
 //!   [`max_cache_entries`](CachedPipeline::max_cache_entries) inputs with FIFO
@@ -39,13 +42,15 @@ const DEFAULT_MAX_CACHE_ENTRIES: usize = 16;
 /// dtypes — plus its row count, hashed with [`DefaultHasher`]. Reading a schema
 /// is cheap, which is what makes the check worth doing on every call.
 ///
-/// The trade-off is that the key says nothing about the **values**: changing a
-/// frame in place, keeping its columns, dtypes and height, still hits the old
-/// entry and returns the output computed from the previous contents. Call
-/// [`clear_cache`](CachedPipeline::clear_cache) after mutating a frame whose
-/// schema did not change — that is the escape hatch the trade-off buys. Hashing
-/// the values instead would close the gap at the cost of hashing every input on
-/// every call, which is deliberately not done here.
+/// The trade-off is that the key says nothing about the **values**: *any* frame
+/// with the same column names, dtypes and height — a different cross-validation
+/// fold, a fixed-size batch, an edited copy — hits the existing entry and
+/// silently returns the output computed from the earlier frame. Only reuse a
+/// `CachedPipeline` across calls whose inputs are known to be identical, and
+/// call [`clear_cache`](CachedPipeline::clear_cache) before transforming a
+/// different frame that shares the schema and height. Hashing the values
+/// instead would close the gap at the cost of hashing every input on every
+/// call, which is deliberately not done here.
 ///
 /// # Eviction and limits
 ///
@@ -96,8 +101,9 @@ pub struct CachedPipeline {
     /// [`Transform::transform`] takes `&self`, so recording an entry needs
     /// interior mutability. Borrows are confined to a single look-up or insert
     /// and no transformer runs while the cache is borrowed, so the `RefCell`
-    /// cannot panic. The consequence is that `CachedPipeline` is `Send` but not
-    /// `Sync`; sharing one cache across threads is out of scope.
+    /// cannot panic. Sharing one cache across threads is out of scope, and the
+    /// wrapper is neither `Send` nor `Sync` anyway: the boxes in the wrapped
+    /// [`Pipeline`] carry no `Send` bound.
     cache: RefCell<Cache>,
     /// Upper bound on cached inputs; `0` disables caching.
     max_cache_entries: usize,
@@ -133,9 +139,10 @@ impl CachedPipeline {
 
     /// Drop every cached entry.
     ///
-    /// Call this after mutating a frame in place (same columns, dtypes and row
-    /// count) that was transformed before: the cache key cannot see value
-    /// changes, so the old entry would keep answering.
+    /// Call this before transforming a different frame that happens to share the
+    /// cached key — same column names, dtypes and row count — whether it was
+    /// produced by an in-place edit or is simply another frame of that shape:
+    /// the key cannot see value changes, so the old entry would keep answering.
     pub fn clear_cache(&mut self) {
         self.cache.borrow_mut().clear();
     }
