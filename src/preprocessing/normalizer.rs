@@ -68,6 +68,10 @@ impl Normalizer {
         Self::new(Norm::Max)
     }
 
+    /// Compute the norm of a single row, ignoring `NaN` entries.
+    ///
+    /// Note: the L2 variant sums squares, so it can overflow to infinity on
+    /// extreme-magnitude inputs; callers must reject non-finite results.
     fn row_norm(values: &[f64], norm: Norm) -> f64 {
         let clean_vals = values.iter().copied().filter(|v| !v.is_nan());
         match norm {
