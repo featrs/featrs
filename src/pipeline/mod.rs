@@ -4,12 +4,15 @@
 //! - [`Pipeline`] chains multiple transformers sequentially.
 //! - [`ColumnTransformer`] applies different transformers to different column subsets.
 //! - [`FeatureUnion`] applies every transformer to the full input and concatenates outputs.
+//! - [`ConditionalPipeline`] routes columns to transformers through predicates.
 //! - [`DataFrameTransformer`] is a trait alias for type erasure.
 
 pub mod column_transformer;
+pub mod conditional_pipeline;
 pub mod feature_union;
 
 pub use column_transformer::ColumnTransformer;
+pub use conditional_pipeline::ConditionalPipeline;
 pub use feature_union::FeatureUnion;
 
 use crate::traits::{Error, Fit, Result, Transform};
