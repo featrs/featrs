@@ -68,6 +68,10 @@ impl Normalizer {
         Self::new(Norm::Max)
     }
 
+    /// Compute the norm of a single row, ignoring `NaN` entries.
+    ///
+    /// Note: the L2 variant sums squares, so it can overflow to infinity on
+    /// extreme-magnitude inputs; callers must reject non-finite results.
     fn row_norm(values: &[f64], norm: Norm) -> f64 {
         let clean_vals = values.iter().copied().filter(|v| !v.is_nan());
         match norm {
@@ -148,6 +152,13 @@ impl Transform<DataFrame> for Normalizer {
         for i in 0..n_rows {
             let row_vals: Vec<f64> = col_data.iter().filter_map(|col| col[i]).collect();
             let norm = Self::row_norm(&row_vals, self.norm);
+            if !norm.is_finite() {
+                return Err(Error::InvalidInput(format!(
+                    "Normalizer.transform: row {} norm overflowed or is not finite. \
+                     Input values are too large for f64 norm computation.",
+                    i
+                )));
+            }
             if norm > f64::EPSILON {
                 for col in &mut col_data {
                     if let Some(v) = col[i].as_mut()
@@ -279,5 +290,22 @@ mod tests {
 
         assert_relative_eq!(col_a.get(2).unwrap(), 1.0, epsilon = 1e-6);
         assert!(col_b.get(2).unwrap().is_nan());
+    }
+
+    /// Regression for #181: extreme magnitude values (~1e300) must error
+    /// on transform due to L2 norm overflow, instead of silently producing
+    /// infinite norm which maps all features to 0.0.
+    #[test]
+    fn test_normalizer_l2_extreme_magnitude_overflow_error() {
+        let a = Column::from(Series::new("a".into(), &[1e300_f64, 2e300]));
+        let b = Column::from(Series::new("b".into(), &[3e300_f64, 4e300]));
+        let df = DataFrame::new(2, vec![a, b]).unwrap();
+        let mut normalizer = Normalizer::l2();
+        normalizer.fit(df.clone()).unwrap();
+        let res = normalizer.transform(df);
+        assert!(
+            res.is_err(),
+            "Normalizer L2 on 1e300 magnitude row must error on norm overflow"
+        );
     }
 }
