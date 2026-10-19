@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `CachedPipeline` in `src/pipeline/cached_pipeline.rs` wraps a `Pipeline` and
+  caches every step's output, so transforming an input the cache has already
+  seen replays the stored frames instead of re-running the steps. The cache key
+  is a fingerprint of the input schema (column names + dtypes) and row count —
+  cheap to compute on every call, but blind to value changes that keep those the
+  same, so `clear_cache()` is the escape hatch after an in-place edit. Up to
+  `max_cache_entries` inputs are remembered (16 by default) with FIFO eviction;
+  `0` disables caching entirely. `cache_size()` reports the current count, a
+  re-fit clears the cache, and the wrapper's output always matches the wrapped
+  `Pipeline::transform` for the input it was computed from (#75).
+
 - `ConditionalPipeline` in `src/pipeline/conditional_pipeline.rs` routes each
   column to a transformer by [`ColumnPredicate`]: dtype (`IsFloat64`, `IsInt`,
   `IsString`, `IsDatetime`, `IsBoolean`), a regex on the column name
