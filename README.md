@@ -77,6 +77,7 @@ let scaled = scaler.transform(data)?;
 | | `ColumnTransformer` | Apply different transformers to different columns |
 | | `FeatureUnion` | Apply every transformer to the full input and concatenate the outputs |
 | | `ConditionalPipeline` | Route each column to a transformer by dtype, name pattern, or custom predicate |
+| | `CachedPipeline` | Cache each step's output and replay it for a repeated input |
 | **Selection** | `VarianceThreshold` | Remove low-variance features |
 | | `SelectKBest` | Select top-k features by statistical test (ANOVA F) |
 | | `SelectPercentile` | Select the top N% of features by statistical test |
@@ -195,6 +196,36 @@ for (column, label) in cp.assignments().unwrap_or(&[]) {
 `ColumnPredicate::Custom` takes a `Fn(&Column) -> bool + Send + Sync` closure,
 so data-dependent routing (cardinality, null fraction) works too. The closure
 runs before any transformer and must not panic.
+
+### CachedPipeline
+
+Wraps a `Pipeline` and remembers each step's output, so re-transforming an
+input it has already seen replays the cached frames instead of recomputing
+them. The key is the input's schema (column names + dtypes) plus row count:
+cheap, but blind to value changes that leave the schema alone, so it cannot tell
+one frame from another of the same shape and height — use it only for repeated
+calls on inputs known to be identical, and call `clear_cache()` before
+transforming a different frame of the same shape. Entries are bounded by
+`max_cache_entries` (default 16, oldest evicted first); `0` disables caching.
+
+```rust
+use featrs::prelude::*;
+
+let pipeline = Pipeline::new(vec![
+    ("scale".into(), Box::new(StandardScaler::new())),
+    ("poly".into(), Box::new(PolynomialFeatures::new(2)?)),
+])?;
+let mut cached = CachedPipeline::new(pipeline).max_cache_entries(4);
+
+cached.fit(df.clone())?;
+let first = cached.transform(df.clone())?;  // computes and caches
+let second = cached.transform(df)?;         // replayed from the cache
+assert_eq!(cached.cache_size(), 1);
+assert!(second.equals_missing(&first));
+
+// Before transforming a different frame of the same shape, drop the stale entries.
+cached.clear_cache();
+```
 
 ### PolynomialFeatures (builder pattern)
 

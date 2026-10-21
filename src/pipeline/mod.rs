@@ -5,12 +5,16 @@
 //! - [`ColumnTransformer`] applies different transformers to different column subsets.
 //! - [`FeatureUnion`] applies every transformer to the full input and concatenates outputs.
 //! - [`ConditionalPipeline`] routes columns to transformers through predicates.
+//! - [`CachedPipeline`] wraps a [`Pipeline`] and replays cached step outputs for
+//!   repeated inputs.
 //! - [`DataFrameTransformer`] is a trait alias for type erasure.
 
+pub mod cached_pipeline;
 pub mod column_transformer;
 pub mod conditional_pipeline;
 pub mod feature_union;
 
+pub use cached_pipeline::CachedPipeline;
 pub use column_transformer::ColumnTransformer;
 pub use conditional_pipeline::ConditionalPipeline;
 pub use feature_union::FeatureUnion;
