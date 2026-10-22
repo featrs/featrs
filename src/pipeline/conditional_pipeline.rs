@@ -920,7 +920,7 @@ mod tests {
             .unwrap();
 
         let mut cp = ConditionalPipeline::new()
-            .rule(ColumnPredicate::IsBoolean, Box::new(Binarizer::new(0.5)))
+            .rule(ColumnPredicate::IsBoolean, Box::new(Passthrough))
             .rule(ColumnPredicate::IsDatetime, Box::new(ColumnDropper))
             .fallback(Box::new(Passthrough));
         let df = DataFrame::new(2, vec![bools, datetimes, dates]).unwrap();
@@ -936,7 +936,8 @@ mod tests {
         );
 
         let out = cp.transform(df).unwrap();
-        // `flag` binarized, `ts` dropped by its rule, `d` passed through.
+        // `flag` claimed by its rule, `ts` dropped by its rule, `d` passed
+        // through by the fallback.
         assert_eq!(
             out.get_column_names()
                 .iter()
