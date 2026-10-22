@@ -65,6 +65,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `force_strategy(...)` replaces the heuristic, and `chosen_name()` and
   `column_types()` expose the selection (#87).
 
+### Fixed
+
+- `Binarizer` now rejects input frames with no `Float64` column at both fit
+  and transform time using the shared `require_f64_columns` check, so strings
+  and dates no longer pass through unchanged and silently leak their dtype to
+  downstream steps. The error matches what every sibling numeric transformer
+  already emits. Non-`Float64` columns accompanying at least one `Float64`
+  column keep their pass-through behaviour (#182). Frames that previously fit
+  and transformed successfully because they held no `Float64` column at all
+  now hard-error; cast them before fitting.
+
 ## [0.5.0] - 2026-10-02
 
 ### Added

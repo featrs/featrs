@@ -4,9 +4,16 @@
 //! become `1.0`, others become `0.0`. Missing data is preserved: polars
 //! nulls stay null, and non-finite `NaN` inputs are emitted as null rather
 //! than being conflated with a below-threshold value.
+//!
+//! Only `Float64` columns are binarized. A frame that contains no `Float64`
+//! column at all is rejected with the same descriptive error every sibling
+//! numeric transformer emits, at fit time and again at transform time, instead
+//! of silently passing strings or dates through. Non-`Float64` columns that
+//! arrive alongside at least one `Float64` column are passed through
+//! unchanged.
 
 use crate::traits::{Error, Fit, Result, Transform};
-use crate::util::{numeric_f64_columns, replace_f64_column_opt};
+use crate::util::{replace_f64_column_opt, require_f64_columns};
 use polars::prelude::*;
 
 /// Binarize data according to a threshold.
@@ -67,7 +74,8 @@ impl Fit<DataFrame> for Binarizer {
     type Output = ();
 
     /// Validate the input DataFrame has at least one row and one column,
-    /// and that the configured threshold is finite.
+    /// contains at least one `Float64` column, and that the configured
+    /// threshold is finite.
     fn fit(&mut self, x: DataFrame) -> Result<()> {
         // Reset fitted state up front: if this fit fails, transform must
         // not silently apply a stale configuration from a previous fit.
@@ -87,6 +95,7 @@ impl Fit<DataFrame> for Binarizer {
                     .into(),
             ));
         }
+        require_f64_columns(&x, "Binarizer")?;
         self.fitted = true;
         Ok(())
     }
@@ -98,6 +107,11 @@ impl Transform<DataFrame> for Binarizer {
     /// Binarize the data: values above the threshold become `1.0`,
     /// other finite values become `0.0`, and missing data stays missing —
     /// nulls remain null and `NaN` inputs are emitted as null.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::NotFitted` if called before [`Fit::fit`], and
+    /// `Error::InvalidInput` if the frame contains no `Float64` column.
     fn transform(&self, x: DataFrame) -> Result<DataFrame> {
         if !self.fitted {
             return Err(Error::NotFitted(
@@ -107,7 +121,7 @@ impl Transform<DataFrame> for Binarizer {
             ));
         }
 
-        let col_names = numeric_f64_columns(&x);
+        let col_names = require_f64_columns(&x, "Binarizer")?;
 
         let mut out = x.clone();
         let threshold = self.threshold;
@@ -282,6 +296,85 @@ mod tests {
 
         b.fit(good_df).unwrap();
         assert!(b.fitted);
+    }
+
+    #[test]
+    fn test_binarizer_rejects_all_string_frame_at_fit() {
+        let s = Column::from(Series::new(
+            "str1".into(),
+            &["a".to_string(), "b".to_string()],
+        ));
+        let df = DataFrame::new(2, vec![s]).unwrap();
+
+        let mut b = Binarizer::new(0.5);
+        let err = b.fit(df).unwrap_err();
+        assert!(
+            err.to_string().contains("no Float64 columns found"),
+            "error should reuse the shared dtype message, got: {err}"
+        );
+        assert!(
+            err.to_string().contains("Binarizer"),
+            "error should name the transformer, got: {err}"
+        );
+        assert!(!b.fitted);
+    }
+
+    #[test]
+    fn test_binarizer_rejects_date_frame_at_fit() {
+        let d = Series::new("d".into(), &[1i32, 2])
+            .cast(&DataType::Date)
+            .unwrap();
+        let df = DataFrame::new(2, vec![Column::from(d)]).unwrap();
+
+        let mut b = Binarizer::new(0.5);
+        let err = b.fit(df).unwrap_err();
+        assert!(
+            err.to_string().contains("no Float64 columns found"),
+            "error should reuse the shared dtype message, got: {err}"
+        );
+        assert!(!b.fitted);
+    }
+
+    #[test]
+    fn test_binarizer_transform_rejects_all_string_frame() {
+        let x = Column::from(Series::new("x".into(), &[1.0f64, 2.0]));
+        let good = DataFrame::new(2, vec![x]).unwrap();
+        let mut b = Binarizer::new(0.5);
+        b.fit(good).unwrap();
+
+        let s = Column::from(Series::new(
+            "str1".into(),
+            &["a".to_string(), "b".to_string()],
+        ));
+        let strings = DataFrame::new(2, vec![s]).unwrap();
+
+        let err = b.transform(strings).unwrap_err();
+        assert!(
+            err.to_string().contains("no Float64 columns found"),
+            "a fitted Binarizer must not pass strings through, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_binarizer_mixed_frame_preserves_non_f64_dtype() {
+        // Non-Float64 columns alongside a Float64 column must survive
+        // transform untouched, dtype and values intact.
+        let d = Series::new("d".into(), &[1i32, 2])
+            .cast(&DataType::Date)
+            .unwrap();
+        let x = Column::from(Series::new("x".into(), &[-1.0f64, 0.9]));
+        let df = DataFrame::new(2, vec![Column::from(d), x]).unwrap();
+
+        let mut b = Binarizer::new(0.5);
+        b.fit(df.clone()).unwrap();
+        let result = b.transform(df).unwrap();
+
+        let d = result.column("d").unwrap();
+        assert_eq!(d.dtype(), &DataType::Date, "date column dtype must survive");
+        assert_eq!(result.column("x").unwrap().dtype(), &DataType::Float64);
+        let vals = column_values(result.column("x").unwrap());
+        assert_relative_eq!(vals[0].unwrap(), 0.0, epsilon = 1e-6);
+        assert_relative_eq!(vals[1].unwrap(), 1.0, epsilon = 1e-6);
     }
 
     #[test]
