@@ -38,6 +38,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   heuristics. Diagnostic, not a transformer: no fitted state, the input frame is
   never modified. `print_summary` and `to_markdown` render the report; `to_json`
   waits on the optional `serde` feature (issue #28).
+
+- `SchemaValidator` foundation in `src/traits/schema.rs`: a transformer can now
+  describe the input it needs with `SchemaSpec` / `ColumnRequirement`
+  (`Named`, `Dtype { min_count }`, `NameOnly`) via the new `RequiresSchema`
+  trait, and `validate_schema(&spec, &df)` reports every unmet requirement in one
+  `InvalidInput` error (`Missing column …`, `Dtype mismatch on …`,
+  `Require >= N Float64 columns, found M`) instead of failing late inside Polars.
+  Validation is schema-only, so a null-only column still satisfies a dtype
+  requirement. `StandardScaler`, `MinMaxScaler`, `RobustScaler`, `Binarizer`,
+  `OneHotEncoder` and `VarianceThreshold` implement `RequiresSchema` (#82).
+
 - `AutoScaler` in `src/preprocessing/auto_scaler.rs` picks a scaling strategy
   per `Float64` column from the column's own statistics instead of making the
   caller choose between `StandardScaler`, `MinMaxScaler`, `RobustScaler`,

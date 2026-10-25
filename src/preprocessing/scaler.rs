@@ -7,6 +7,7 @@
 
 use polars::prelude::*;
 
+use crate::traits::schema::{RequiresSchema, SchemaSpec};
 use crate::traits::{Error, Fit, Result, Transform};
 use crate::util::{replace_f64_column, require_f64_columns};
 
@@ -562,6 +563,27 @@ impl Transform<DataFrame> for RobustScaler {
     }
 }
 
+/// `StandardScaler` normalizes every `Float64` column, so it needs at least one.
+impl RequiresSchema for StandardScaler {
+    fn required_schema(&self) -> SchemaSpec {
+        SchemaSpec::f64_columns(1)
+    }
+}
+
+/// `MinMaxScaler` scales every `Float64` column, so it needs at least one.
+impl RequiresSchema for MinMaxScaler {
+    fn required_schema(&self) -> SchemaSpec {
+        SchemaSpec::f64_columns(1)
+    }
+}
+
+/// `RobustScaler` scales every `Float64` column, so it needs at least one.
+impl RequiresSchema for RobustScaler {
+    fn required_schema(&self) -> SchemaSpec {
+        SchemaSpec::f64_columns(1)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -907,5 +929,23 @@ mod tests {
             fit_result.is_err(),
             "RobustScaler on overflowing IQR data must error"
         );
+    }
+
+    #[test]
+    fn test_scalers_require_float64_columns() {
+        use crate::traits::schema::validate_schema;
+
+        let strings = Column::from(Series::new("s".into(), &["a", "b"]));
+        let no_f64 = DataFrame::new(2, vec![strings]).unwrap();
+
+        for spec in [
+            StandardScaler::new().required_schema(),
+            MinMaxScaler::new().required_schema(),
+            RobustScaler::new().required_schema(),
+        ] {
+            assert_eq!(spec, SchemaSpec::f64_columns(1));
+            assert!(validate_schema(&spec, &no_f64).is_err());
+            assert!(validate_schema(&spec, &make_test_df()).is_ok());
+        }
     }
 }

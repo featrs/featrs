@@ -8,6 +8,7 @@
 //! - [`CountEncoder`] — replace categories with their raw occurrence counts
 //! - [`FrequencyEncoder`] — replace categories with their observed relative frequencies
 
+use crate::traits::schema::{RequiresSchema, SchemaSpec};
 use crate::traits::{Error, Fit, Result, Transform};
 use polars::prelude::*;
 use std::collections::{HashMap, HashSet};
@@ -1216,6 +1217,13 @@ impl Transform<DataFrame> for BinaryEncoder {
         }
 
         DataFrame::new(x.height(), out_cols).map_err(|e| Error::Computation(e.to_string()))
+    }
+}
+
+/// `OneHotEncoder::fit` reads every column as `String`, so all must be `String`.
+impl RequiresSchema for OneHotEncoder {
+    fn required_schema(&self) -> SchemaSpec {
+        SchemaSpec::all_columns(DataType::String)
     }
 }
 
@@ -2539,5 +2547,25 @@ mod tests {
         // x=0 -> 0, y=1 -> 1; p=0 -> 0, q=1 -> 1.
         assert_eq!(a_bits, vec![0, 1, 0]);
         assert_eq!(b_bits, vec![0, 0, 1]);
+    }
+
+    #[test]
+    fn test_one_hot_encoder_requires_all_string_columns() {
+        use crate::traits::schema::validate_schema;
+
+        let spec = OneHotEncoder::new().required_schema();
+        assert_eq!(spec, SchemaSpec::all_columns(DataType::String));
+        assert!(validate_schema(&spec, &make_categorical_df()).is_ok());
+
+        // `fit` reads every column as String, so one numeric column is a
+        // schema violation, not something to skip.
+        let x = Column::from(Series::new("x".into(), &[1.0f64, 2.0, 3.0, 4.0]));
+        let mut mixed = make_categorical_df();
+        mixed.with_column(x).unwrap();
+        let msg = validate_schema(&spec, &mixed).unwrap_err().to_string();
+        assert!(
+            msg.contains("Dtype mismatch on 'x' (expected: String, actual: Float64)"),
+            "message: {msg}"
+        );
     }
 }

@@ -7,6 +7,7 @@
 //! values (e.g. all-`NaN` or all-`±Inf`) are dropped from selection, matching
 //! the crate-wide finite-values-only convention used by the scalers.
 
+use crate::traits::schema::{RequiresSchema, SchemaSpec};
 use crate::traits::{Error, Fit, Result, Transform};
 use polars::prelude::*;
 
@@ -157,6 +158,13 @@ impl Transform<DataFrame> for VarianceThreshold {
     }
 }
 
+/// `VarianceThreshold` scores `Float64` columns, so it needs at least one.
+impl RequiresSchema for VarianceThreshold {
+    fn required_schema(&self) -> SchemaSpec {
+        SchemaSpec::f64_columns(1)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -254,5 +262,18 @@ mod tests {
 
         assert_eq!(result.width(), 1);
         assert_eq!(result.get_column_names()[0].as_str(), "good");
+    }
+
+    #[test]
+    fn test_variance_threshold_requires_float64_columns() {
+        use crate::traits::schema::validate_schema;
+
+        let spec = VarianceThreshold::new(0.5).required_schema();
+        assert_eq!(spec, SchemaSpec::f64_columns(1));
+
+        let s = Column::from(Series::new("s".into(), &["a", "b"]));
+        let strings = DataFrame::new(2, vec![s]).unwrap();
+        assert!(validate_schema(&spec, &strings).is_err());
+        assert!(validate_schema(&spec, &make_test_df()).is_ok());
     }
 }
