@@ -114,6 +114,23 @@ impl SchemaSpec {
             required_columns: vec![ColumnRequirement::AllDtype { dtype }],
         }
     }
+
+    /// Build a spec from `(name, dtype)` pairs computed at runtime.
+    ///
+    /// Fitted transformers use this to turn the columns they learned at `fit`
+    /// into named requirements, so `validate_schema` catches a frame that
+    /// carries the right dtypes under the wrong names.
+    pub(crate) fn from_names<I>(names: I) -> Self
+    where
+        I: IntoIterator<Item = (String, DataType)>,
+    {
+        Self {
+            required_columns: names
+                .into_iter()
+                .map(|(name, dtype)| ColumnRequirement::Named { name, dtype })
+                .collect(),
+        }
+    }
 }
 
 /// One way a frame can fail a [`SchemaSpec`].
@@ -247,15 +264,16 @@ pub fn check_schema(spec: &SchemaSpec, df: &DataFrame) -> Vec<SchemaViolation> {
                 }
             }
             ColumnRequirement::AllDtype { dtype } => {
-                // ponytail: report the first offending column only; the message
-                // would otherwise repeat once per column on wide frames.
-                if let Some(col) = df.columns().iter().find(|col| col.dtype() != dtype) {
-                    violations.push(SchemaViolation::DtypeMismatch {
+                // One mismatch per offending column, matching the aggregation
+                // contract of `check_schema`: a caller correcting errors should
+                // see every column that needs casting, not just the first.
+                violations.extend(df.columns().iter().filter(|col| col.dtype() != dtype).map(
+                    |col| SchemaViolation::DtypeMismatch {
                         name: col.name().to_string(),
                         expected: dtype.clone(),
                         actual: col.dtype().clone(),
-                    });
-                }
+                    },
+                ));
             }
             ColumnRequirement::Dtype { dtype, min_count } => {
                 let found = df
@@ -356,14 +374,33 @@ mod tests {
     }
 
     #[test]
-    fn all_columns_dtype_flags_first_offender() {
+    fn all_columns_reports_every_offender() {
         let spec = SchemaSpec::all_columns(DataType::String);
-        assert!(validate_schema(&spec, &frame()).is_err());
+        // `frame()` has one Float64 and one String column: only `x` offends.
+        let violations = check_schema(&spec, &frame());
+        assert_eq!(
+            violations,
+            vec![SchemaViolation::DtypeMismatch {
+                name: "x".into(),
+                expected: DataType::String,
+                actual: DataType::Float64,
+            }]
+        );
 
-        let only_strings = SchemaSpec::all_columns(DataType::String);
         let df =
             DataFrame::new(2, vec![Column::from(Series::new("s".into(), &["a", "b"]))]).unwrap();
-        assert!(validate_schema(&only_strings, &df).is_ok());
+        assert!(validate_schema(&spec, &df).is_ok());
+
+        // Two offending columns produce two violations, not just the first.
+        let both_numeric = DataFrame::new(
+            2,
+            vec![
+                Column::from(Series::new("a".into(), &[1.0f64, 2.0])),
+                Column::from(Series::new("b".into(), &[3.0f64, 4.0])),
+            ],
+        )
+        .unwrap();
+        assert_eq!(check_schema(&spec, &both_numeric).len(), 2);
     }
 
     #[test]

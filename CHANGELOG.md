@@ -46,8 +46,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `InvalidInput` error (`Missing column …`, `Dtype mismatch on …`,
   `Require >= N Float64 columns, found M`) instead of failing late inside Polars.
   Validation is schema-only, so a null-only column still satisfies a dtype
-  requirement. `StandardScaler`, `MinMaxScaler`, `RobustScaler`, `Binarizer`,
-  `OneHotEncoder` and `VarianceThreshold` implement `RequiresSchema` (#82).
+  requirement. Once a transformer is fitted its spec names the columns it
+  learned, so a frame carrying the right dtypes under different names is
+  rejected up front rather than failing inside `transform`. `StandardScaler`,
+  `MinMaxScaler`, `RobustScaler`, `Binarizer`, `OneHotEncoder` and
+  `VarianceThreshold` implement `RequiresSchema` (#82).
 
 - `AutoScaler` in `src/preprocessing/auto_scaler.rs` picks a scaling strategy
   per `Float64` column from the column's own statistics instead of making the

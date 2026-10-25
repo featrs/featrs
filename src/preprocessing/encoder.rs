@@ -8,7 +8,7 @@
 //! - [`CountEncoder`] — replace categories with their raw occurrence counts
 //! - [`FrequencyEncoder`] — replace categories with their observed relative frequencies
 
-use crate::traits::schema::{RequiresSchema, SchemaSpec};
+use crate::traits::schema::{ColumnRequirement, RequiresSchema, SchemaSpec};
 use crate::traits::{Error, Fit, Result, Transform};
 use polars::prelude::*;
 use std::collections::{HashMap, HashSet};
@@ -1220,10 +1220,30 @@ impl Transform<DataFrame> for BinaryEncoder {
     }
 }
 
-/// `OneHotEncoder::fit` reads every column as `String`, so all must be `String`.
+/// `OneHotEncoder::fit` reads every column as `String`; after fitting, the
+/// columns it learned must still be there.
 impl RequiresSchema for OneHotEncoder {
     fn required_schema(&self) -> SchemaSpec {
-        SchemaSpec::all_columns(DataType::String)
+        match &self.categories {
+            Some(categories) => SchemaSpec::from_names(
+                categories
+                    .iter()
+                    .map(|c| (c.column.clone(), DataType::String)),
+            ),
+            None => SchemaSpec {
+                required_columns: vec![
+                    ColumnRequirement::AllDtype {
+                        dtype: DataType::String,
+                    },
+                    // A zero-column frame has no offending column for
+                    // `AllDtype`, yet `fit` cannot encode it.
+                    ColumnRequirement::Dtype {
+                        dtype: DataType::String,
+                        min_count: 1,
+                    },
+                ],
+            },
+        }
     }
 }
 
@@ -2554,7 +2574,6 @@ mod tests {
         use crate::traits::schema::validate_schema;
 
         let spec = OneHotEncoder::new().required_schema();
-        assert_eq!(spec, SchemaSpec::all_columns(DataType::String));
         assert!(validate_schema(&spec, &make_categorical_df()).is_ok());
 
         // `fit` reads every column as String, so one numeric column is a
@@ -2567,5 +2586,29 @@ mod tests {
             msg.contains("Dtype mismatch on 'x' (expected: String, actual: Float64)"),
             "message: {msg}"
         );
+
+        // A frame with no columns has no offender for the all-dtype check, so
+        // the minimum-count requirement is what catches it.
+        let empty = DataFrame::empty();
+        assert!(validate_schema(&spec, &empty).is_err());
+
+        // After fit the spec names the fitted columns, so dropping one is
+        // caught up front instead of failing inside transform.
+        let mut enc = OneHotEncoder::new();
+        enc.fit(make_categorical_df()).unwrap();
+        let fitted = enc.required_schema();
+        assert_eq!(
+            fitted,
+            SchemaSpec::exact(&[("color", DataType::String), ("size", DataType::String)])
+        );
+        let only_color = DataFrame::new(
+            2,
+            vec![Column::from(Series::new("color".into(), &["red", "blue"]))],
+        )
+        .unwrap();
+        let msg = validate_schema(&fitted, &only_color)
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("Missing column 'size'"), "message: {msg}");
     }
 }

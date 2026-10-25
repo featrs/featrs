@@ -563,24 +563,39 @@ impl Transform<DataFrame> for RobustScaler {
     }
 }
 
-/// `StandardScaler` normalizes every `Float64` column, so it needs at least one.
+/// `StandardScaler` normalizes the `Float64` columns it learned at fit.
 impl RequiresSchema for StandardScaler {
     fn required_schema(&self) -> SchemaSpec {
-        SchemaSpec::f64_columns(1)
+        match &self.params {
+            Some(params) => {
+                SchemaSpec::from_names(params.iter().map(|p| (p.name.clone(), DataType::Float64)))
+            }
+            None => SchemaSpec::f64_columns(1),
+        }
     }
 }
 
-/// `MinMaxScaler` scales every `Float64` column, so it needs at least one.
+/// `MinMaxScaler` scales the `Float64` columns it learned at fit.
 impl RequiresSchema for MinMaxScaler {
     fn required_schema(&self) -> SchemaSpec {
-        SchemaSpec::f64_columns(1)
+        match &self.params {
+            Some(params) => {
+                SchemaSpec::from_names(params.iter().map(|p| (p.name.clone(), DataType::Float64)))
+            }
+            None => SchemaSpec::f64_columns(1),
+        }
     }
 }
 
-/// `RobustScaler` scales every `Float64` column, so it needs at least one.
+/// `RobustScaler` scales the `Float64` columns it learned at fit.
 impl RequiresSchema for RobustScaler {
     fn required_schema(&self) -> SchemaSpec {
-        SchemaSpec::f64_columns(1)
+        match &self.params {
+            Some(params) => {
+                SchemaSpec::from_names(params.iter().map(|p| (p.name.clone(), DataType::Float64)))
+            }
+            None => SchemaSpec::f64_columns(1),
+        }
     }
 }
 
@@ -938,14 +953,32 @@ mod tests {
         let strings = Column::from(Series::new("s".into(), &["a", "b"]));
         let no_f64 = DataFrame::new(2, vec![strings]).unwrap();
 
-        for spec in [
+        // Before fit each scaler only knows the dtype it needs.
+        let specs = [
             StandardScaler::new().required_schema(),
             MinMaxScaler::new().required_schema(),
             RobustScaler::new().required_schema(),
-        ] {
-            assert_eq!(spec, SchemaSpec::f64_columns(1));
-            assert!(validate_schema(&spec, &no_f64).is_err());
-            assert!(validate_schema(&spec, &make_test_df()).is_ok());
+        ];
+        for spec in &specs {
+            assert_eq!(*spec, SchemaSpec::f64_columns(1));
+            assert!(validate_schema(spec, &no_f64).is_err());
+            assert!(validate_schema(spec, &make_test_df()).is_ok());
         }
+
+        // After fit the spec names the columns the scaler learned, so a frame
+        // that swaps in a different Float64 column no longer passes.
+        let mut scaler = StandardScaler::new();
+        scaler.fit(make_test_df()).unwrap();
+        let fitted = scaler.required_schema();
+        assert_eq!(
+            fitted,
+            SchemaSpec::exact(&[("a", DataType::Float64), ("b", DataType::Float64)])
+        );
+        let other = Column::from(Series::new("c".into(), &[1.0f64, 2.0, 3.0]));
+        let wrong_name = DataFrame::new(3, vec![other]).unwrap();
+        let msg = validate_schema(&fitted, &wrong_name)
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("Missing column 'a'"), "message: {msg}");
     }
 }
