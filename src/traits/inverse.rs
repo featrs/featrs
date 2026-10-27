@@ -14,8 +14,13 @@
 //!
 //! - Calling `inverse_transform` before `fit` returns [`Error::NotFitted`](crate::traits::Error::NotFitted).
 //! - The inverse is only meaningful for data that came out of `transform`.
-//!   Values outside the transform's range are extrapolated rather than
-//!   rejected, so the caller owns that contract.
+//!   Values outside the transform's range are handled per transformer: the
+//!   affine scalers extrapolate,
+//!   [`QuantileTransformer`](crate::preprocessing::quantile_transformer::QuantileTransformer)
+//!   clamps ranks to the fitted range, and
+//!   [`PowerTransformer`](crate::preprocessing::power_transformer::PowerTransformer)
+//!   returns [`Error::InvalidInput`](crate::traits::Error::InvalidInput) when
+//!   the inverse is undefined for a value.
 //! - Roundtrips are numerically approximate: compare with a tolerance, never
 //!   with exact equality.
 //!
