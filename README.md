@@ -84,6 +84,7 @@ let scaled = scaler.transform(data)?;
 | | `CorrelationThreshold` | Drop features highly correlated with others |
 | | `MutualInformationSelector` | Rank/select top-k features by mutual information with the target |
 | **Auto** | `AutoTypeDetector` | Auto-detect column types (incl. numeric-string columns) and apply default transforms |
+| **Schema** | `SchemaSpec` / `validate_schema` | Describe a transformer's required input columns and dtypes, check a frame before transforming, and report every mismatch in one error |
 | **Diagnostics** | `DataQualityReport` | Summarise nulls, per-column stats and outliers, cardinality, duplicate rows/columns, constant columns, and the preprocessing it recommends |
 
 ## Examples

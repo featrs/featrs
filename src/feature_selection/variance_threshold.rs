@@ -7,6 +7,7 @@
 //! values (e.g. all-`NaN` or all-`±Inf`) are dropped from selection, matching
 //! the crate-wide finite-values-only convention used by the scalers.
 
+use crate::traits::schema::{RequiresSchema, SchemaSpec};
 use crate::traits::{Error, Fit, Result, Transform};
 use polars::prelude::*;
 
@@ -157,6 +158,21 @@ impl Transform<DataFrame> for VarianceThreshold {
     }
 }
 
+/// `VarianceThreshold` scores `Float64` columns; after fitting, the columns it
+/// selected must still be present.
+impl RequiresSchema for VarianceThreshold {
+    fn required_schema(&self) -> SchemaSpec {
+        match &self.selected_columns {
+            Some(selected) => SchemaSpec::from_names(
+                selected
+                    .iter()
+                    .map(|name| (name.clone(), DataType::Float64)),
+            ),
+            None => SchemaSpec::f64_columns(1),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -254,5 +270,38 @@ mod tests {
 
         assert_eq!(result.width(), 1);
         assert_eq!(result.get_column_names()[0].as_str(), "good");
+    }
+
+    #[test]
+    fn test_variance_threshold_requires_float64_columns() {
+        use crate::traits::schema::validate_schema;
+
+        let spec = VarianceThreshold::new(0.5).required_schema();
+        assert_eq!(spec, SchemaSpec::f64_columns(1));
+
+        let s = Column::from(Series::new("s".into(), &["a", "b"]));
+        let strings = DataFrame::new(2, vec![s]).unwrap();
+        assert!(validate_schema(&spec, &strings).is_err());
+        assert!(validate_schema(&spec, &make_test_df()).is_ok());
+
+        // After fit the spec names the retained columns, so a frame without
+        // them is rejected up front instead of failing inside transform.
+        let mut vt = VarianceThreshold::new(0.1);
+        vt.fit(make_test_df()).unwrap();
+        let fitted = vt.required_schema();
+        assert_eq!(
+            fitted,
+            SchemaSpec::exact(&[("high_var", DataType::Float64)])
+        );
+        let only_low = DataFrame::new(
+            3,
+            vec![Column::from(Series::new(
+                "low_var".into(),
+                &[1.0f64, 1.0, 1.0],
+            ))],
+        )
+        .unwrap();
+        let msg = validate_schema(&fitted, &only_low).unwrap_err().to_string();
+        assert!(msg.contains("Missing column 'high_var'"), "message: {msg}");
     }
 }

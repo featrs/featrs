@@ -12,6 +12,7 @@
 //! arrive alongside at least one `Float64` column are passed through
 //! unchanged.
 
+use crate::traits::schema::{RequiresSchema, SchemaSpec};
 use crate::traits::{Error, Fit, Result, Transform};
 use crate::util::{replace_f64_column_opt, require_f64_columns};
 use polars::prelude::*;
@@ -139,6 +140,13 @@ impl Transform<DataFrame> for Binarizer {
         }
 
         Ok(out)
+    }
+}
+
+/// `Binarizer::fit` requires at least one `Float64` column, so the spec does too.
+impl RequiresSchema for Binarizer {
+    fn required_schema(&self) -> SchemaSpec {
+        SchemaSpec::f64_columns(1)
     }
 }
 
@@ -421,5 +429,21 @@ mod tests {
         let vals = column_values(result.column("x").unwrap());
         assert_relative_eq!(vals[0].unwrap(), 1.0, epsilon = 1e-6);
         assert_relative_eq!(vals[1].unwrap(), 0.0, epsilon = 1e-6);
+    }
+
+    #[test]
+    fn test_binarizer_requires_float64_columns() {
+        use crate::traits::schema::validate_schema;
+
+        // `fit` rejects frames without a Float64 column, so the spec does too.
+        let spec = Binarizer::new(0.5).required_schema();
+        assert_eq!(spec, SchemaSpec::f64_columns(1));
+
+        let s = Column::from(Series::new("s".into(), &["a", "b"]));
+        let strings = DataFrame::new(2, vec![s]).unwrap();
+        assert!(validate_schema(&spec, &strings).is_err());
+
+        let x = Column::from(Series::new("x".into(), &[0.0f64, 1.0]));
+        assert!(validate_schema(&spec, &DataFrame::new(2, vec![x]).unwrap()).is_ok());
     }
 }
