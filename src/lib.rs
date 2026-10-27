@@ -139,6 +139,7 @@ pub mod prelude {
     pub use crate::time_series::expanding::ExpandingAggregator;
     pub use crate::time_series::lag::Lagger;
     pub use crate::time_series::rolling::RollingAggregator;
+    pub use crate::traits::inverse::{HasInverse, InverseTransform};
     pub use crate::traits::schema::{
         ColumnRequirement, RequiresSchema, SchemaSpec, SchemaViolation, check_schema,
         validate_schema,

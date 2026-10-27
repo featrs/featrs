@@ -13,6 +13,10 @@
 //! [`schema::validate_schema`] (or [`schema::check_schema`] for the structured
 //! violations) to check a frame against that description up front.
 //!
+//! Reversibility lives in [`inverse`]: invertible transformers implement
+//! [`inverse::InverseTransform`] to map output features back to the input
+//! domain, and advertise that capability through [`inverse::HasInverse`].
+//!
 //! Unsupervised transformers (scalers, encoders, imputers, …) implement
 //! [`Fit`]; the few supervised ones (e.g. `SelectKBest`) implement
 //! [`FitSupervised`] instead. This mirrors scikit-learn's split between
@@ -29,8 +33,10 @@
 
 use thiserror::Error;
 
+pub mod inverse;
 pub mod schema;
 
+pub use inverse::{HasInverse, InverseTransform};
 pub use schema::{
     ColumnRequirement, RequiresSchema, SchemaSpec, SchemaViolation, check_schema, validate_schema,
 };

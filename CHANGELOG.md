@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `InverseTransform<X>` in `src/traits/inverse.rs` reverses an invertible
+  transformer: `inverse_transform` maps data from the transformer's output space
+  back to its input space, so predictions can be read in original units and a
+  step can be checked with `inverse_transform(transform(x)) ≈ x`. It is
+  implemented by `StandardScaler` (`x * std + mean`), `MinMaxScaler`
+  (`(x - range_min) / scale + min`, extrapolating outside the fitted range),
+  `RobustScaler` (`x * scale + center`), `MaxAbsScaler` (`x * max_abs`),
+  `LogTransformer` (`exp`, `expm1`, `2^y`, `10^y`, `b^y` per `LogMethod`),
+  `PowerTransformer` (Box-Cox and Yeo-Johnson inverses plus the undo of the
+  optional standardization) and `QuantileTransformer` (interpolation on the
+  stored reference grid). Calling `inverse_transform` before `fit` returns
+  `Error::NotFitted`; a value outside the fitted transform's range — one whose
+  inverse base would be non-positive for Box-Cox or Yeo-Johnson — returns
+  `Error::InvalidInput`. `HasInverse::is_invertible` reports the capability for
+  each of them. Composition-level inverses (`Pipeline`, `ColumnTransformer`,
+  `FeatureUnion`) are not included: those steps are type-erased to
+  `Box<dyn DataFrameTransformer>` and cannot forward `inverse_transform` without
+  changing their public construction API (#84).
+
 - `CachedPipeline` in `src/pipeline/cached_pipeline.rs` wraps a `Pipeline` and
   caches every step's output, so transforming an input the cache has already
   seen replays the stored frames instead of re-running the steps. The cache key

@@ -6,6 +6,7 @@
 
 use polars::prelude::*;
 
+use crate::traits::inverse::{HasInverse, InverseTransform};
 use crate::traits::{Error, Fit, Result, Transform};
 use crate::util::{replace_f64_column, require_f64_columns};
 
@@ -171,6 +172,38 @@ impl Transform<DataFrame> for MaxAbsScaler {
     }
 }
 
+impl InverseTransform<DataFrame> for MaxAbsScaler {
+    type Output = DataFrame;
+
+    /// Undo the max-abs scaling: `x * max_abs` per column.
+    ///
+    /// An all-zero training column stores `max_abs = 0` and passed values
+    /// through unchanged during `transform`, so its inverse is the identity
+    /// too rather than a multiplication into zero.
+    fn inverse_transform(&self, x: DataFrame) -> Result<DataFrame> {
+        let not_fitted = || {
+            Error::NotFitted(
+                "MaxAbsScaler has not been fitted. \
+                 Call .fit(dataframe) before .inverse_transform()."
+                    .into(),
+            )
+        };
+        let names = self.column_names.as_ref().ok_or_else(not_fitted)?;
+        let max_abs = self.max_abs.as_ref().ok_or_else(not_fitted)?;
+
+        let mut out = x.clone();
+        for (name, scale) in names.iter().zip(max_abs) {
+            replace_f64_column(&mut out, name, "MaxAbsScaler", |v| {
+                if *scale == 0.0 { v } else { v * *scale }
+            })?;
+        }
+
+        Ok(out)
+    }
+}
+
+impl HasInverse for MaxAbsScaler {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -180,6 +213,61 @@ mod tests {
         let a = Column::from(Series::new("a".into(), &[1.0f64, -2.0]));
         let b = Column::from(Series::new("b".into(), &[0.5f64, 1.0]));
         DataFrame::new(2, vec![a, b]).unwrap()
+    }
+
+    fn column_values(df: &DataFrame, name: &str) -> Vec<f64> {
+        df.column(name)
+            .unwrap()
+            .f64()
+            .unwrap()
+            .iter()
+            .flatten()
+            .collect()
+    }
+
+    #[test]
+    fn test_inverse_roundtrip() {
+        let df = make_test_df();
+        let mut scaler = MaxAbsScaler::new();
+        scaler.fit(df.clone()).unwrap();
+
+        let scaled = scaler.transform(df.clone()).unwrap();
+        let restored = scaler.inverse_transform(scaled).unwrap();
+
+        for name in df.get_column_names() {
+            let want = column_values(&df, name);
+            let got = column_values(&restored, name);
+            for (w, g) in want.iter().zip(&got) {
+                assert_relative_eq!(*w, *g, epsilon = 1e-12);
+            }
+        }
+    }
+
+    #[test]
+    fn test_inverse_before_fit_is_not_fitted() {
+        let err = MaxAbsScaler::new()
+            .inverse_transform(make_test_df())
+            .unwrap_err();
+        assert!(matches!(err, Error::NotFitted(_)), "error: {err}");
+    }
+
+    #[test]
+    fn test_reports_invertible() {
+        assert!(MaxAbsScaler::new().is_invertible());
+    }
+
+    #[test]
+    fn test_inverse_all_zero_column_is_identity() {
+        // An all-zero column stores max_abs = 0, and transform passes it
+        // through unchanged, so the inverse must not multiply it into zero.
+        let col = Column::from(Series::new("z".into(), &[0.0f64, 0.0]));
+        let df = DataFrame::new(2, vec![col]).unwrap();
+
+        let mut scaler = MaxAbsScaler::new();
+        scaler.fit(df.clone()).unwrap();
+        let restored = scaler.inverse_transform(df).unwrap();
+
+        assert_eq!(column_values(&restored, "z"), vec![0.0, 0.0]);
     }
 
     #[test]

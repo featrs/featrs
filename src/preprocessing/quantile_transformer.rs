@@ -1,6 +1,7 @@
 use polars::prelude::*;
 use statrs::distribution::{ContinuousCDF, Normal};
 
+use crate::traits::inverse::{HasInverse, InverseTransform};
 use crate::traits::{Error, Fit, Result, Transform};
 use crate::util::{replace_f64_column, require_f64_columns};
 
@@ -215,8 +216,86 @@ impl Transform<DataFrame> for QuantileTransformer {
     }
 }
 
-/// Small epsilon used to clamp uniform ranks before applying the probit
-/// (inverse normal CDF).  `inverse_cdf(0)` = `-inf` and `inverse_cdf(1)` = `+inf`,
+/// Map a rank in `[0, 1]` back to a value by interpolating the quantile
+/// reference grid in reverse.
+///
+/// Inverse of [`map_value_to_rank`]: rank `0` maps to the first reference,
+/// rank `1` to the last, and intermediate ranks interpolate linearly between
+/// neighbouring references. A degenerate grid (all references equal) maps
+/// every rank to that value.
+fn map_rank_to_value(rank: f64, references: &[f64], n_q: usize) -> f64 {
+    if n_q <= 1 {
+        return references.first().copied().unwrap_or(f64::NAN);
+    }
+    let pos = rank.clamp(0.0, 1.0) * (n_q - 1) as f64;
+    let lo = pos.floor() as usize;
+    if lo + 1 >= n_q {
+        return references[n_q - 1];
+    }
+    let frac = pos - lo as f64;
+    references[lo] * (1.0 - frac) + references[lo + 1] * frac
+}
+
+impl InverseTransform<DataFrame> for QuantileTransformer {
+    type Output = DataFrame;
+
+    /// Undo the quantile transform by interpolating the stored reference grid.
+    ///
+    /// For [`OutputDistribution::Uniform`] the input is read as a rank in
+    /// `[0, 1]`; for [`OutputDistribution::Normal`] it is first mapped back to
+    /// a rank through the standard-normal CDF. Ranks outside `[0, 1]` are
+    /// clamped, and the result is precision-limited by the reference grid: the
+    /// inverse is exact only at the reference points and piecewise-linear
+    /// between them.
+    fn inverse_transform(&self, x: DataFrame) -> Result<Self::Output> {
+        let refs = self.references.as_ref().ok_or_else(|| {
+            Error::NotFitted(
+                "QuantileTransformer has not been fitted. \
+                 Call .fit(dataframe) before .inverse_transform()."
+                    .into(),
+            )
+        })?;
+
+        let normal = match self.output_distribution {
+            OutputDistribution::Normal => Some(Normal::new(0.0, 1.0).map_err(|e| {
+                Error::Computation(format!(
+                    "QuantileTransformer: failed to create standard normal distribution. {}",
+                    e
+                ))
+            })?),
+            OutputDistribution::Uniform => None,
+        };
+
+        let mut out = x.clone();
+
+        for qr in refs {
+            let n_q = qr.references.len();
+            let references = &qr.references;
+
+            if n_q == 0 {
+                continue;
+            }
+
+            replace_f64_column(&mut out, &qr.name, "QuantileTransformer", |v| {
+                if v.is_nan() {
+                    return f64::NAN;
+                }
+                let rank = match normal {
+                    Some(ref dist) => dist.cdf(v),
+                    None => v,
+                };
+                map_rank_to_value(rank, references, n_q)
+            })?;
+        }
+
+        Ok(out)
+    }
+}
+
+impl HasInverse for QuantileTransformer {}
+
+/// Small epsilon used to clamp uniform ranks before applying probit
+/// (inverse normal CDF). `inverse_cdf(0)` = `-inf` and `inverse_cdf(1)` = `+inf`,
 /// so we avoid the asymptotes.
 const PROBIT_EPSILON: f64 = 1e-15;
 
@@ -526,5 +605,85 @@ mod tests {
         // to rank 2/5 = 0.4, which is strictly larger.
         assert_relative_eq!(vals_large[2], 0.4, epsilon = 1e-6);
         assert!(vals_small[2] < vals_large[2]);
+    }
+
+    fn column_values(df: &DataFrame, name: &str) -> Vec<f64> {
+        df.column(name)
+            .unwrap()
+            .f64()
+            .unwrap()
+            .iter()
+            .flatten()
+            .collect()
+    }
+
+    #[test]
+    fn test_inverse_roundtrip_uniform() {
+        let vals = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+        let col = Column::from(Series::new("x".into(), &vals));
+        let df = DataFrame::new(vals.len(), vec![col]).unwrap();
+
+        let mut qt = QuantileTransformer::new();
+        qt.fit(df.clone()).unwrap();
+        let transformed = qt.transform(df.clone()).unwrap();
+        let restored = qt.inverse_transform(transformed).unwrap();
+
+        let want = column_values(&df, "x");
+        let got = column_values(&restored, "x");
+        for (w, g) in want.iter().zip(&got) {
+            assert_relative_eq!(*w, *g, epsilon = 1e-9);
+        }
+    }
+
+    #[test]
+    fn test_inverse_roundtrip_normal() {
+        let vals = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+        let col = Column::from(Series::new("x".into(), &vals));
+        let df = DataFrame::new(vals.len(), vec![col]).unwrap();
+
+        let mut qt = QuantileTransformer::new().output_distribution(OutputDistribution::Normal);
+        qt.fit(df.clone()).unwrap();
+        let transformed = qt.transform(df.clone()).unwrap();
+        let restored = qt.inverse_transform(transformed).unwrap();
+
+        let want = column_values(&df, "x");
+        let got = column_values(&restored, "x");
+        for (w, g) in want.iter().zip(&got) {
+            assert_relative_eq!(*w, *g, epsilon = 1e-9);
+        }
+    }
+
+    #[test]
+    fn test_inverse_clamps_ranks_outside_unit_interval() {
+        let vals = [1.0, 2.0, 3.0];
+        let col = Column::from(Series::new("x".into(), &vals));
+        let df = DataFrame::new(3, vec![col]).unwrap();
+
+        let mut qt = QuantileTransformer::new();
+        qt.fit(df).unwrap();
+
+        let out = Column::from(Series::new("x".into(), &[-5.0f64, 5.0]));
+        let ranks = DataFrame::new(2, vec![out]).unwrap();
+        let restored = qt.inverse_transform(ranks).unwrap();
+
+        let got = column_values(&restored, "x");
+        assert_relative_eq!(got[0], 1.0, epsilon = 1e-12);
+        assert_relative_eq!(got[1], 3.0, epsilon = 1e-12);
+    }
+
+    #[test]
+    fn test_inverse_before_fit_is_not_fitted() {
+        let col = Column::from(Series::new("x".into(), &[0.5f64]));
+        let df = DataFrame::new(1, vec![col]).unwrap();
+
+        let err = QuantileTransformer::new()
+            .inverse_transform(df)
+            .unwrap_err();
+        assert!(matches!(err, Error::NotFitted(_)), "error: {err}");
+    }
+
+    #[test]
+    fn test_reports_invertible() {
+        assert!(QuantileTransformer::new().is_invertible());
     }
 }

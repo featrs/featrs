@@ -115,6 +115,26 @@ println!("{:?}", scaler.chosen_name());
 let scaled = scaler.transform(df)?;
 ```
 
+### Inverse transforms
+
+Invertible transformers implement `InverseTransform`, which maps output features
+back to the input domain. Scalers, `LogTransformer`, `PowerTransformer`, and
+`QuantileTransformer` support it; encoders, binarizers, discretizers, and feature
+selectors do not. Roundtrips are approximate, so compare with a tolerance.
+
+```rust
+use featrs::prelude::*;
+
+let mut scaler = StandardScaler::new();
+scaler.fit(df.clone())?;
+let scaled = scaler.transform(df.clone())?;
+// Original units again, e.g. to read model predictions as raw values.
+let restored = scaler.inverse_transform(scaled)?;
+
+// Capability discovery for a transformer you did not construct yourself.
+assert!(scaler.is_invertible());
+```
+
 ### Pipeline
 
 ```rust

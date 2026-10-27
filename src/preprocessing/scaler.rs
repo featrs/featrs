@@ -7,6 +7,7 @@
 
 use polars::prelude::*;
 
+use crate::traits::inverse::{HasInverse, InverseTransform};
 use crate::traits::schema::{RequiresSchema, SchemaSpec};
 use crate::traits::{Error, Fit, Result, Transform};
 use crate::util::{replace_f64_column, require_f64_columns};
@@ -210,6 +211,36 @@ impl Transform<DataFrame> for StandardScaler {
     }
 }
 
+impl InverseTransform<DataFrame> for StandardScaler {
+    type Output = DataFrame;
+
+    /// Undo the z-score transform: `x * std + mean` per column.
+    ///
+    /// Columns whose scaling was disabled at fit time store `std = 1`, and
+    /// columns whose centering was disabled store `mean = 0`, so the same
+    /// formula restores both configurations.
+    fn inverse_transform(&self, x: DataFrame) -> Result<DataFrame> {
+        let params = self.params.as_ref().ok_or_else(|| {
+            Error::NotFitted(
+                "StandardScaler has not been fitted. \
+                 Call .fit(dataframe) before .inverse_transform()."
+                    .into(),
+            )
+        })?;
+        let mut out = x.clone();
+
+        for p in params {
+            let mean = p.mean;
+            let std = p.std;
+            replace_f64_column(&mut out, &p.name, "StandardScaler", |v| v * std + mean)?;
+        }
+
+        Ok(out)
+    }
+}
+
+impl HasInverse for StandardScaler {}
+
 /// Scale features to a given range (default `[0, 1]`).
 ///
 /// For each column `x`, computes `(x - min) / (max - min) * range + range_min`.
@@ -363,6 +394,39 @@ impl Transform<DataFrame> for MinMaxScaler {
         Ok(out)
     }
 }
+
+impl InverseTransform<DataFrame> for MinMaxScaler {
+    type Output = DataFrame;
+
+    /// Undo the min-max scaling: `(x - range_min) / scale + min` per column.
+    ///
+    /// The denominator comes from the stored `scale`, so no range is
+    /// re-derived. Values outside the fitted range extrapolate past the
+    /// original training min/max instead of being clipped.
+    fn inverse_transform(&self, x: DataFrame) -> Result<DataFrame> {
+        let r_min = self.feature_range.0;
+        let params = self.params.as_ref().ok_or_else(|| {
+            Error::NotFitted(
+                "MinMaxScaler has not been fitted. \
+                 Call .fit(dataframe) before .inverse_transform()."
+                    .into(),
+            )
+        })?;
+        let mut out = x.clone();
+
+        for p in params {
+            let min = p.min;
+            let scale = p.scale;
+            replace_f64_column(&mut out, &p.name, "MinMaxScaler", |v| {
+                (v - r_min) / scale + min
+            })?;
+        }
+
+        Ok(out)
+    }
+}
+
+impl HasInverse for MinMaxScaler {}
 
 /// Scale features using statistics robust to outliers.
 ///
@@ -562,6 +626,36 @@ impl Transform<DataFrame> for RobustScaler {
         Ok(out)
     }
 }
+
+impl InverseTransform<DataFrame> for RobustScaler {
+    type Output = DataFrame;
+
+    /// Undo the robust scaling: `x * scale + center` per column.
+    ///
+    /// Centering and scaling are stored as `center = 0` / `scale = 1` when
+    /// they were disabled at fit time, so the same formula inverts every
+    /// builder configuration.
+    fn inverse_transform(&self, x: DataFrame) -> Result<DataFrame> {
+        let params = self.params.as_ref().ok_or_else(|| {
+            Error::NotFitted(
+                "RobustScaler has not been fitted. \
+                 Call .fit(dataframe) before .inverse_transform()."
+                    .into(),
+            )
+        })?;
+        let mut out = x.clone();
+
+        for p in params {
+            let center = p.center;
+            let scale = p.scale;
+            replace_f64_column(&mut out, &p.name, "RobustScaler", |v| v * scale + center)?;
+        }
+
+        Ok(out)
+    }
+}
+
+impl HasInverse for RobustScaler {}
 
 /// `StandardScaler` normalizes the `Float64` columns it learned at fit.
 impl RequiresSchema for StandardScaler {
@@ -980,5 +1074,133 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(msg.contains("Missing column 'a'"), "message: {msg}");
+    }
+
+    fn column_values(df: &DataFrame, name: &str) -> Vec<f64> {
+        df.column(name)
+            .unwrap()
+            .f64()
+            .unwrap()
+            .iter()
+            .flatten()
+            .collect()
+    }
+
+    fn assert_roundtrip(inverse: &DataFrame, original: &DataFrame) {
+        for name in original.get_column_names() {
+            let want = column_values(original, name);
+            let got = column_values(inverse, name);
+            assert_eq!(want.len(), got.len());
+            for (w, g) in want.iter().zip(&got) {
+                assert_relative_eq!(*w, *g, epsilon = 1e-9);
+            }
+        }
+    }
+
+    #[test]
+    fn test_standard_scaler_inverse_roundtrip() {
+        let df = make_test_df();
+        let mut scaler = StandardScaler::new();
+        scaler.fit(df.clone()).unwrap();
+
+        let scaled = scaler.transform(df.clone()).unwrap();
+        let restored = scaler.inverse_transform(scaled).unwrap();
+
+        assert_roundtrip(&restored, &df);
+    }
+
+    #[test]
+    fn test_standard_scaler_inverse_without_mean_or_std() {
+        let df = make_test_df();
+
+        for scaler in [
+            StandardScaler::new().with_mean(false),
+            StandardScaler::new().with_std(false),
+            StandardScaler::new().with_mean(false).with_std(false),
+        ] {
+            let mut scaler = scaler;
+            scaler.fit(df.clone()).unwrap();
+            let scaled = scaler.transform(df.clone()).unwrap();
+            let restored = scaler.inverse_transform(scaled).unwrap();
+            assert_roundtrip(&restored, &df);
+        }
+    }
+
+    #[test]
+    fn test_min_max_scaler_inverse_roundtrip() {
+        let df = make_test_df();
+
+        for scaler in [
+            MinMaxScaler::new(),
+            MinMaxScaler::new().feature_range((-1.0, 1.0)),
+        ] {
+            let mut scaler = scaler;
+            scaler.fit(df.clone()).unwrap();
+            let scaled = scaler.transform(df.clone()).unwrap();
+            let restored = scaler.inverse_transform(scaled).unwrap();
+            assert_roundtrip(&restored, &df);
+        }
+    }
+
+    #[test]
+    fn test_min_max_scaler_inverse_extrapolates_out_of_range() {
+        let col = Column::from(Series::new("a".into(), &[1.0f64, 3.0, 5.0]));
+        let df = DataFrame::new(3, vec![col]).unwrap();
+        let mut scaler = MinMaxScaler::new();
+        scaler.fit(df).unwrap();
+
+        // 2.0 is outside the fitted output range [0, 1]; the inverse
+        // extrapolates past the training maximum instead of clipping.
+        let out = Column::from(Series::new("a".into(), &[2.0f64]));
+        let extreme = DataFrame::new(1, vec![out]).unwrap();
+        let restored = scaler.inverse_transform(extreme).unwrap();
+
+        assert_relative_eq!(column_values(&restored, "a")[0], 9.0, epsilon = 1e-9);
+    }
+
+    #[test]
+    fn test_robust_scaler_inverse_roundtrip() {
+        let df = make_test_df();
+
+        for scaler in [
+            RobustScaler::new(),
+            RobustScaler::new().with_centering(false),
+            RobustScaler::new().with_scaling(false),
+            RobustScaler::new()
+                .with_centering(false)
+                .with_scaling(false),
+        ] {
+            let mut scaler = scaler;
+            scaler.fit(df.clone()).unwrap();
+            let scaled = scaler.transform(df.clone()).unwrap();
+            let restored = scaler.inverse_transform(scaled).unwrap();
+            assert_roundtrip(&restored, &df);
+        }
+    }
+
+    #[test]
+    fn test_scaler_inverse_before_fit_is_not_fitted() {
+        let df = make_test_df();
+
+        let errors = [
+            StandardScaler::new()
+                .inverse_transform(df.clone())
+                .unwrap_err(),
+            MinMaxScaler::new()
+                .inverse_transform(df.clone())
+                .unwrap_err(),
+            RobustScaler::new().inverse_transform(df).unwrap_err(),
+        ];
+
+        for err in errors {
+            assert!(matches!(err, Error::NotFitted(_)), "error: {err}");
+        }
+    }
+
+    #[test]
+    fn test_scalers_report_invertible() {
+        assert!(StandardScaler::new().is_invertible());
+        assert!(MinMaxScaler::new().is_invertible());
+        assert!(RobustScaler::new().is_invertible());
     }
 }
