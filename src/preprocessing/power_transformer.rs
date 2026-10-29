@@ -24,6 +24,7 @@
 
 use polars::prelude::*;
 
+use crate::traits::inverse::{HasInverse, InverseTransform};
 use crate::traits::{Error, Fit, Result, Transform};
 use crate::util::{replace_f64_column, require_f64_columns};
 
@@ -140,7 +141,40 @@ fn yeo_johnson(x: f64, lambda: f64) -> f64 {
     }
 }
 
-/// Log-likelihood of `lambda` under the MLE criterion scikit-learn uses:
+/// Box-Cox inverse of a single value, or `None` when the shifted value would
+/// need a non-positive base (`y * lambda + 1 <= 0`).
+fn box_cox_inverse(y: f64, lambda: f64) -> Option<f64> {
+    if lambda.abs() < 1e-10 {
+        return Some(y.exp());
+    }
+    let base = y * lambda + 1.0;
+    (base > 0.0).then(|| base.powf(1.0 / lambda))
+}
+
+/// Yeo-Johnson inverse of a single value, or `None` when the shifted value
+/// would need a non-positive base. The sign of `y` selects the branch the
+/// forward transform used: `x >= 0` always maps to `y >= 0`, and `x < 0`
+/// always maps to `y < 0`.
+fn yeo_johnson_inverse(y: f64, lambda: f64) -> Option<f64> {
+    if y >= 0.0 {
+        if lambda.abs() < 1e-10 {
+            return Some(y.exp() - 1.0);
+        }
+        let base = y * lambda + 1.0;
+        (base > 0.0).then(|| base.powf(1.0 / lambda) - 1.0)
+    } else {
+        let two_minus_lambda = 2.0 - lambda;
+        if two_minus_lambda.abs() < 1e-10 {
+            return Some(1.0 - (-y).exp());
+        }
+        // Forward: y = -(((1 - x)^(2-λ) - 1) / (2-λ)), so the base to invert is
+        // `1 - y * (2-λ)`.
+        let base = 1.0 - y * two_minus_lambda;
+        (base > 0.0).then(|| 1.0 - base.powf(1.0 / two_minus_lambda))
+    }
+}
+
+/// Log-likelihood `lambda` under MLE criterion scikit-learn uses:
 /// maximize `-n/2 * ln(var(y)) + (lambda - 1) * sum(log_terms)`.
 fn log_likelihood(vals: &[f64], lambda: f64, method: PowerMethod) -> f64 {
     let n = vals.len() as f64;
@@ -361,6 +395,79 @@ impl Transform<DataFrame> for PowerTransformer {
         Ok(out)
     }
 }
+
+/// Inverse of a single power-transformed value, dispatching on the method.
+fn inverse_power(y: f64, method: PowerMethod, lambda: f64) -> Option<f64> {
+    match method {
+        PowerMethod::BoxCox => box_cox_inverse(y, lambda),
+        PowerMethod::YeoJohnson => yeo_johnson_inverse(y, lambda),
+    }
+}
+
+impl InverseTransform<DataFrame> for PowerTransformer {
+    type Output = DataFrame;
+
+    /// Undo the power transform, and the standardization when it was enabled:
+    /// `x = T⁻¹(y * std + mean)` per column.
+    ///
+    /// Returns [`Error::InvalidInput`] for a value outside the range the
+    /// forward transform can produce, i.e. one whose inverse base would be
+    /// non-positive.
+    fn inverse_transform(&self, x: DataFrame) -> Result<Self::Output> {
+        let params = self.params.as_ref().ok_or_else(|| {
+            Error::NotFitted(
+                "PowerTransformer has not been fitted. \
+                 Call .fit(dataframe) before .inverse_transform()."
+                    .into(),
+            )
+        })?;
+        let method = self.method;
+        let mut out = x.clone();
+
+        for p in params {
+            let lambda = p.lambda;
+            let mean = p.mean;
+            let std = p.std;
+
+            let bad = {
+                let s = out.column(p.name.as_str()).map_err(|e| {
+                    Error::InvalidInput(format!(
+                        "PowerTransformer.inverse_transform: column '{}' not found. {e}",
+                        p.name
+                    ))
+                })?;
+                let ca = s.f64().map_err(|e| {
+                    Error::InvalidInput(format!(
+                        "PowerTransformer.inverse_transform: column '{}' has dtype {}; \
+                         expected Float64. {e}",
+                        p.name,
+                        s.dtype()
+                    ))
+                })?;
+                ca.iter()
+                    .flatten()
+                    .map(|v| v * std + mean)
+                    .find(|t| !t.is_nan() && inverse_power(*t, method, lambda).is_none())
+            };
+
+            if let Some(bad) = bad {
+                return Err(Error::InvalidInput(format!(
+                    "PowerTransformer.inverse_transform: value {bad} in column '{}' is outside \
+                     the range of the fitted transform (lambda={lambda}); its inverse is undefined.",
+                    p.name
+                )));
+            }
+
+            replace_f64_column(&mut out, &p.name, "PowerTransformer", move |v| {
+                inverse_power(v * std + mean, method, lambda).unwrap_or(f64::NAN)
+            })?;
+        }
+
+        Ok(out)
+    }
+}
+
+impl HasInverse for PowerTransformer {}
 
 #[cfg(test)]
 mod tests {
@@ -585,5 +692,83 @@ mod tests {
             params[0].lambda, params[1].lambda,
             "different distributions should generally yield different lambdas"
         );
+    }
+
+    fn column_values(df: &DataFrame, name: &str) -> Vec<f64> {
+        df.column(name)
+            .unwrap()
+            .f64()
+            .unwrap()
+            .iter()
+            .flatten()
+            .collect()
+    }
+
+    fn assert_roundtrip(df: &DataFrame, method: PowerMethod, standardize: bool, eps: f64) {
+        let mut t = PowerTransformer::new()
+            .method(method)
+            .standardize(standardize);
+        t.fit(df.clone()).unwrap();
+        let transformed = t.transform(df.clone()).unwrap();
+        let restored = t.inverse_transform(transformed).unwrap();
+
+        let want = column_values(df, "x");
+        let got = column_values(&restored, "x");
+        assert_eq!(want.len(), got.len());
+        for (w, g) in want.iter().zip(&got) {
+            assert_relative_eq!(*w, *g, epsilon = eps);
+        }
+    }
+
+    #[test]
+    fn test_box_cox_inverse_roundtrip() {
+        assert_roundtrip(&skewed_positive_df(), PowerMethod::BoxCox, true, 1e-8);
+    }
+
+    #[test]
+    fn test_yeo_johnson_inverse_roundtrip() {
+        assert_roundtrip(&skewed_positive_df(), PowerMethod::YeoJohnson, true, 1e-8);
+    }
+
+    #[test]
+    fn test_power_inverse_roundtrip_without_standardize() {
+        assert_roundtrip(&skewed_positive_df(), PowerMethod::YeoJohnson, false, 1e-8);
+    }
+
+    #[test]
+    fn test_yeo_johnson_inverse_roundtrip_negative_values() {
+        let vals: Vec<f64> = (-15..15).map(|i| i as f64).collect();
+        let col = Column::from(Series::new("x".into(), &vals));
+        let df = DataFrame::new(vals.len(), vec![col]).unwrap();
+
+        assert_roundtrip(&df, PowerMethod::YeoJohnson, true, 1e-8);
+    }
+
+    #[test]
+    fn test_inverse_rejects_out_of_range_value() {
+        let df = skewed_positive_df();
+        let mut t = PowerTransformer::new().method(PowerMethod::BoxCox);
+        t.fit(df).unwrap();
+
+        // Far outside the Box-Cox output range: the inverse base becomes
+        // non-positive, which is undefined.
+        let bad = Column::from(Series::new("x".into(), &[-1e6f64]));
+        let out = DataFrame::new(1, vec![bad]).unwrap();
+
+        let err = t.inverse_transform(out).unwrap_err();
+        assert!(matches!(err, Error::InvalidInput(_)), "error: {err}");
+    }
+
+    #[test]
+    fn test_inverse_before_fit_is_not_fitted() {
+        let err = PowerTransformer::new()
+            .inverse_transform(skewed_positive_df())
+            .unwrap_err();
+        assert!(matches!(err, Error::NotFitted(_)), "error: {err}");
+    }
+
+    #[test]
+    fn test_reports_invertible() {
+        assert!(PowerTransformer::new().is_invertible());
     }
 }

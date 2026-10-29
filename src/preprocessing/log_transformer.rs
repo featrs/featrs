@@ -23,6 +23,7 @@
 
 use polars::prelude::*;
 
+use crate::traits::inverse::{HasInverse, InverseTransform};
 use crate::traits::{Error, Fit, Result, Transform};
 use crate::util::{numeric_f64_columns, replace_f64_column};
 
@@ -311,6 +312,49 @@ impl Transform<DataFrame> for LogTransformer {
         Ok(out)
     }
 }
+
+impl InverseTransform<DataFrame> for LogTransformer {
+    type Output = DataFrame;
+
+    /// Undo the logarithm on the columns learned at fit time.
+    ///
+    /// | Method | Inverse |
+    /// |--------|---------|
+    /// | `Ln` | `exp(y)` |
+    /// | `Log1p` | `expm1(y)` |
+    /// | `Log2` | `2^y` |
+    /// | `Log10` | `10^y` |
+    /// | `LogBase(b)` | `b^y` |
+    ///
+    /// Any real input is inside a logarithm's range, so no value can be
+    /// rejected here; extreme inputs simply overflow to `inf` per `f64`
+    /// semantics.
+    fn inverse_transform(&self, x: DataFrame) -> Result<Self::Output> {
+        if !self.fitted {
+            return Err(Error::NotFitted(
+                "LogTransformer has not been fitted. \
+                 Call .fit(dataframe) before .inverse_transform()."
+                    .into(),
+            ));
+        }
+
+        let mut out = x.clone();
+
+        for name in &self.fitted_columns {
+            replace_f64_column(&mut out, name, "LogTransformer", |v| match self.method {
+                LogMethod::Ln => v.exp(),
+                LogMethod::Log1p => v.exp_m1(),
+                LogMethod::Log2 => 2.0_f64.powf(v),
+                LogMethod::Log10 => 10.0_f64.powf(v),
+                LogMethod::LogBase(b) => b.powf(v),
+            })?;
+        }
+
+        Ok(out)
+    }
+}
+
+impl HasInverse for LogTransformer {}
 
 #[cfg(test)]
 mod tests {
@@ -805,5 +849,84 @@ mod tests {
         let mut transformer = LogTransformer::new();
         let result = transformer.fit(df);
         assert!(result.is_err());
+    }
+
+    fn column_values(df: &DataFrame, name: &str) -> Vec<f64> {
+        df.column(name)
+            .unwrap()
+            .f64()
+            .unwrap()
+            .iter()
+            .flatten()
+            .collect()
+    }
+
+    #[test]
+    fn test_inverse_roundtrip_every_method() {
+        let vals = [0.5, 1.0, 2.0, 7.0];
+        let col = Column::from(Series::new("x".into(), &vals));
+        let df = DataFrame::new(4, vec![col]).unwrap();
+
+        let methods = [
+            LogMethod::Ln,
+            LogMethod::Log1p,
+            LogMethod::Log2,
+            LogMethod::Log10,
+            LogMethod::LogBase(3.0),
+        ];
+
+        for method in methods {
+            let mut transformer = LogTransformer::new().method(method);
+            transformer.fit(df.clone()).unwrap();
+            let logged = transformer.transform(df.clone()).unwrap();
+            let restored = transformer.inverse_transform(logged).unwrap();
+
+            let want = column_values(&df, "x");
+            let got = column_values(&restored, "x");
+            for (w, g) in want.iter().zip(&got) {
+                assert_relative_eq!(*w, *g, epsilon = 1e-12);
+            }
+        }
+    }
+
+    #[test]
+    fn test_inverse_log1p_maps_zero_to_zero() {
+        let col = Column::from(Series::new("x".into(), &[0.0f64, 3.0]));
+        let df = DataFrame::new(2, vec![col]).unwrap();
+
+        let mut transformer = LogTransformer::new();
+        transformer.fit(df.clone()).unwrap();
+        let restored = transformer
+            .inverse_transform(transformer.transform(df).unwrap())
+            .unwrap();
+
+        assert_relative_eq!(column_values(&restored, "x")[0], 0.0, epsilon = 1e-12);
+    }
+
+    #[test]
+    fn test_inverse_only_touches_fitted_columns() {
+        let x = Column::from(Series::new("x".into(), &[1.0f64, 2.0]));
+        let other = Column::from(Series::new("other".into(), &[5.0f64, 6.0]));
+        let df = DataFrame::new(2, vec![x, other]).unwrap();
+
+        let mut transformer = LogTransformer::new().columns(&["x"]);
+        transformer.fit(df.clone()).unwrap();
+        let restored = transformer.inverse_transform(df).unwrap();
+
+        assert_eq!(column_values(&restored, "other"), vec![5.0, 6.0]);
+    }
+
+    #[test]
+    fn test_inverse_before_fit_is_not_fitted() {
+        let col = Column::from(Series::new("x".into(), &[1.0f64, 2.0]));
+        let df = DataFrame::new(2, vec![col]).unwrap();
+
+        let err = LogTransformer::new().inverse_transform(df).unwrap_err();
+        assert!(matches!(err, Error::NotFitted(_)), "error: {err}");
+    }
+
+    #[test]
+    fn test_reports_invertible() {
+        assert!(LogTransformer::new().is_invertible());
     }
 }
