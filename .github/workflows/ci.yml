@@ -132,7 +132,17 @@ jobs:
       - name: Audit
         # quick-xml RUSTSECs are transitive via polars–io → object_store.
         # Tracked: re-evaluate when polars bumps its quick-xml dependency.
-        run: cargo audit --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195
+        # zstd RUSTSECs come from polars-arrow's optional io_ipc_compression
+        # feature, which cargo keeps in Cargo.lock but never enables for our
+        # dependency graph (`cargo tree -i zstd` is empty).
+        # Tracked: re-evaluate when polars enables or bumps zstd.
+        run: >
+          cargo audit
+          --ignore RUSTSEC-2026-0194
+          --ignore RUSTSEC-2026-0195
+          --ignore RUSTSEC-2026-0391
+          --ignore RUSTSEC-2026-0398
+          --ignore RUSTSEC-2026-0403
 
   publish-dry-run:
     name: Publish (dry-run)
