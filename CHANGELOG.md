@@ -113,9 +113,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so any column whose range was below ~2.2e-16 (for example
   `[1e-300, 2e-300, 3e-300, 4e-300, 5e-300]`) collapsed to the constant
   mid-value `0.5` and silently dropped the feature's information. The guard is
-  now scale-relative (`span > f64::EPSILON * max(|min|, |max|)`), so such a
-  column ranks as `[0, 0.25, 0.5, 0.75, 1]`, while a genuinely constant column
-  (including an all-zero one) keeps its documented `0.5` (#180).
+  now degenerate only when the endpoints are equal, so such a column ranks as
+  `[0, 0.25, 0.5, 0.75, 1]`, while a genuinely constant column (including an
+  all-zero one) keeps its documented `0.5` (#180).
 
 ## [0.5.0] - 2026-10-02
 

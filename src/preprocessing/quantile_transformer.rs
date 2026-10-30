@@ -337,15 +337,16 @@ fn percentile_at(sorted: &[f64], q: f64) -> f64 {
 
 /// Whether the span `[lo, hi]` is degenerate, i.e. carries no usable spread.
 ///
-/// The test is *scale-relative*: a span counts as zero only when it is at or
-/// below `f64::EPSILON` times the magnitude of its own endpoints. An absolute
-/// threshold would classify genuinely varying data as constant whenever the
-/// values are small (e.g. `1e-300..5e-300`, span `4e-300`, which is far below
-/// `f64::EPSILON` yet perfectly representable), silently collapsing the
-/// feature. Both a truly constant column and an all-zero column (`lo == hi`,
-/// so the scale is `0` as well) stay degenerate.
+/// Degenerate means the endpoints are equal: there is no spread to rank. Any
+/// non-zero gap is real information the input column carried, however small
+/// (e.g. `1e-300..5e-300`, span `4e-300`) or however large (e.g.
+/// `1e16..1e16 + 2.0`, one representable step). An epsilon test cannot express
+/// that, because the same threshold is far too wide for small values and sits
+/// below a single ulp at large ones; comparing the endpoints directly is exact
+/// at every magnitude. A constant column and an all-zero column both have
+/// `lo == hi`, so both stay degenerate and keep their documented mid-value.
 fn is_degenerate(lo: f64, hi: f64) -> bool {
-    hi - lo <= f64::EPSILON * lo.abs().max(hi.abs())
+    lo == hi
 }
 
 /// Map a single value `v` to its rank in `[0, 1]` using the quantile reference grid.
@@ -581,6 +582,18 @@ mod tests {
         for (g, w) in got.iter().zip(want.iter()) {
             assert_relative_eq!(*g, *w, epsilon = 1e-9);
         }
+    }
+
+    #[test]
+    fn test_large_magnitude_column_not_collapsed() {
+        // One representable step at a large magnitude is genuine spread: an
+        // epsilon threshold would exceed it and collapse the column.
+        let df = make_single_col(&[1e16, 1e16 + 2.0]);
+        let mut qt = QuantileTransformer::new().n_quantiles(2);
+        qt.fit(df.clone()).unwrap();
+        let got = column_values(&qt.transform(df).unwrap(), "x");
+        assert_relative_eq!(got[0], 0.0, epsilon = 1e-12);
+        assert_relative_eq!(got[1], 1.0, epsilon = 1e-12);
     }
 
     #[test]
