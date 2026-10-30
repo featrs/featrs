@@ -1,3 +1,5 @@
+//! Quantile transformation: map each feature to a uniform or normal distribution
+//! by ranking values against a fitted quantile reference grid.
 use polars::prelude::*;
 use statrs::distribution::{ContinuousCDF, Normal};
 
@@ -337,12 +339,9 @@ fn percentile_at(sorted: &[f64], q: f64) -> f64 {
 
 /// Whether the span `[lo, hi]` carries no spread at all.
 ///
-/// Degenerate means the endpoints are the same value, so there is nothing to
-/// rank; any non-zero gap is real information the input column carried.
-/// Deliberately not an epsilon threshold: an absolute one collapses small
-/// values (`1e-300..5e-300`, span `4e-300`), a relative one mis-fires where the
-/// threshold exceeds one representable step (`1e16..1e16 + 2.0`), and equality
-/// is exact at both ends. `-0.0 == 0.0` keeps an all-zero column degenerate.
+/// No epsilon can express this: one small enough for `1e-300..5e-300` is below a
+/// single representable step at `1e16`. Equal endpoints are the only exact test,
+/// and `-0.0 == 0.0` keeps an all-zero column degenerate.
 fn is_degenerate(lo: f64, hi: f64) -> bool {
     lo == hi
 }
@@ -387,13 +386,11 @@ fn map_value_to_rank(v: f64, min_ref: f64, max_ref: f64, references: &[f64], n_q
 
     let r_lo = references[lo];
     let r_hi = references[hi];
-    let span = r_hi - r_lo;
 
-    if is_degenerate(r_lo, r_hi) {
-        return lo as f64 / (n_q - 1) as f64;
-    }
-
-    let t = (v - r_lo) / span;
+    // `Err(i)` from the search above means `references[lo] < v < references[hi]`,
+    // so the two bounds are always distinct here and only the grid guard at the
+    // top can be degenerate.
+    let t = (v - r_lo) / (r_hi - r_lo);
     (lo as f64 + t) / (n_q - 1) as f64
 }
 
@@ -584,9 +581,10 @@ mod tests {
 
     #[test]
     fn test_large_magnitude_adjacent_values_stay_distinct() {
-        // One representable step apart at `1e16`: a relative epsilon sized to
-        // the magnitude would exceed the gap and collapse the column, so the
-        // endpoints must be compared exactly.
+        // One representable step apart at `1e16`. Exact endpoint comparison keeps
+        // these distinct; a magnitude-relative threshold (`EPSILON * 1e16` is
+        // about `2.22`, above the gap of `2.0`) would fold them into `0.5` and
+        // silently flatten the column.
         let lo = 1e16f64;
         let hi = lo + 2.0;
         assert_ne!(lo, hi);
