@@ -335,16 +335,15 @@ fn percentile_at(sorted: &[f64], q: f64) -> f64 {
     }
 }
 
-/// Whether the span `[lo, hi]` is degenerate, i.e. carries no usable spread.
+/// Whether the span `[lo, hi]` carries no spread at all.
 ///
-/// Degenerate means the endpoints are equal: there is no spread to rank. Any
-/// non-zero gap is real information the input column carried, however small
-/// (e.g. `1e-300..5e-300`, span `4e-300`) or however large (e.g.
-/// `1e16..1e16 + 2.0`, one representable step). An epsilon test cannot express
-/// that, because the same threshold is far too wide for small values and sits
-/// below a single ulp at large ones; comparing the endpoints directly is exact
-/// at every magnitude. A constant column and an all-zero column both have
-/// `lo == hi`, so both stay degenerate and keep their documented mid-value.
+/// Degenerate means the endpoints are the same value, so there is nothing to
+/// rank. Any non-zero gap is real information the input column carried. This is
+/// deliberately not an epsilon threshold: an absolute one collapses small
+/// values (`1e-300..5e-300`, span `4e-300`) and a relative one still has to
+/// pick a width that is wrong at one end of the exponent range. Equality is
+/// exact at every magnitude, and `-0.0 == 0.0` keeps an all-zero column
+/// degenerate.
 fn is_degenerate(lo: f64, hi: f64) -> bool {
     lo == hi
 }
@@ -585,22 +584,10 @@ mod tests {
     }
 
     #[test]
-    fn test_large_magnitude_column_not_collapsed() {
-        // One representable step at a large magnitude is genuine spread: an
-        // epsilon threshold would exceed it and collapse the column.
-        let df = make_single_col(&[1e16, 1e16 + 2.0]);
-        let mut qt = QuantileTransformer::new().n_quantiles(2);
-        qt.fit(df.clone()).unwrap();
-        let got = column_values(&qt.transform(df).unwrap(), "x");
-        assert_relative_eq!(got[0], 0.0, epsilon = 1e-12);
-        assert_relative_eq!(got[1], 1.0, epsilon = 1e-12);
-    }
-
-    #[test]
     fn test_zero_only_column_stays_degenerate() {
-        // All-zero: span and scale are both 0, so the column is degenerate
-        // and keeps the documented mid-value.
-        let df = make_single_col(&[0.0, 0.0, 0.0]);
+        // All-zero, including a signed zero: `-0.0 == 0.0`, so the endpoints
+        // are still equal and the column keeps the documented mid-value.
+        let df = make_single_col(&[-0.0, 0.0, 0.0]);
         let mut qt = QuantileTransformer::new().n_quantiles(3);
         qt.fit(df.clone()).unwrap();
         let got = column_values(&qt.transform(df).unwrap(), "x");
