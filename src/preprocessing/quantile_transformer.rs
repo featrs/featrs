@@ -338,12 +338,11 @@ fn percentile_at(sorted: &[f64], q: f64) -> f64 {
 /// Whether the span `[lo, hi]` carries no spread at all.
 ///
 /// Degenerate means the endpoints are the same value, so there is nothing to
-/// rank. Any non-zero gap is real information the input column carried. This is
-/// deliberately not an epsilon threshold: an absolute one collapses small
-/// values (`1e-300..5e-300`, span `4e-300`) and a relative one still has to
-/// pick a width that is wrong at one end of the exponent range. Equality is
-/// exact at every magnitude, and `-0.0 == 0.0` keeps an all-zero column
-/// degenerate.
+/// rank; any non-zero gap is real information the input column carried.
+/// Deliberately not an epsilon threshold: an absolute one collapses small
+/// values (`1e-300..5e-300`, span `4e-300`), a relative one mis-fires where the
+/// threshold exceeds one representable step (`1e16..1e16 + 2.0`), and equality
+/// is exact at both ends. `-0.0 == 0.0` keeps an all-zero column degenerate.
 fn is_degenerate(lo: f64, hi: f64) -> bool {
     lo == hi
 }
