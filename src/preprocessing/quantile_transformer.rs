@@ -583,6 +583,22 @@ mod tests {
     }
 
     #[test]
+    fn test_large_magnitude_adjacent_values_stay_distinct() {
+        // One representable step apart at `1e16`: a relative epsilon sized to
+        // the magnitude would exceed the gap and collapse the column, so the
+        // endpoints must be compared exactly.
+        let lo = 1e16f64;
+        let hi = lo + 2.0;
+        assert_ne!(lo, hi);
+        let df = make_single_col(&[lo, hi]);
+        let mut qt = QuantileTransformer::new().n_quantiles(2);
+        qt.fit(df.clone()).unwrap();
+        let got = column_values(&qt.transform(df).unwrap(), "x");
+        assert_relative_eq!(got[0], 0.0, epsilon = 1e-12);
+        assert_relative_eq!(got[1], 1.0, epsilon = 1e-12);
+    }
+
+    #[test]
     fn test_zero_only_column_stays_degenerate() {
         // All-zero, including a signed zero: `-0.0 == 0.0`, so the endpoints
         // are still equal and the column keeps the documented mid-value.
