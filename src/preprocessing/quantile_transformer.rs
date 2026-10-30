@@ -335,13 +335,27 @@ fn percentile_at(sorted: &[f64], q: f64) -> f64 {
     }
 }
 
+/// Whether the span `[lo, hi]` is degenerate, i.e. carries no usable spread.
+///
+/// The test is *scale-relative*: a span counts as zero only when it is at or
+/// below `f64::EPSILON` times the magnitude of its own endpoints. An absolute
+/// threshold would classify genuinely varying data as constant whenever the
+/// values are small (e.g. `1e-300..5e-300`, span `4e-300`, which is far below
+/// `f64::EPSILON` yet perfectly representable), silently collapsing the
+/// feature. Both a truly constant column and an all-zero column (`lo == hi`,
+/// so the scale is `0` as well) stay degenerate.
+fn is_degenerate(lo: f64, hi: f64) -> bool {
+    hi - lo <= f64::EPSILON * lo.abs().max(hi.abs())
+}
+
 /// Map a single value `v` to its rank in `[0, 1]` using the quantile reference grid.
 ///
+/// - A degenerate grid (no usable spread) maps every value to `0.5`.
 /// - Values below `min_ref` map to `0.0`.
 /// - Values above `max_ref` map to `1.0`.
 /// - Values between adjacent references get a linearly interpolated rank.
 fn map_value_to_rank(v: f64, min_ref: f64, max_ref: f64, references: &[f64], n_q: usize) -> f64 {
-    if min_ref >= max_ref - f64::EPSILON {
+    if is_degenerate(min_ref, max_ref) {
         return 0.5;
     }
     if v <= min_ref {
@@ -376,7 +390,7 @@ fn map_value_to_rank(v: f64, min_ref: f64, max_ref: f64, references: &[f64], n_q
     let r_hi = references[hi];
     let span = r_hi - r_lo;
 
-    if span <= f64::EPSILON {
+    if is_degenerate(r_lo, r_hi) {
         return lo as f64 / (n_q - 1) as f64;
     }
 
@@ -545,6 +559,40 @@ mod tests {
         // All identical values should map to the same rank
         for v in &vals {
             assert_relative_eq!(*v, 0.5, epsilon = 1e-6);
+        }
+    }
+
+    fn make_single_col(values: &[f64]) -> DataFrame {
+        let col = Column::from(Series::new("x".into(), values));
+        DataFrame::new(values.len(), vec![col]).unwrap()
+    }
+
+    #[test]
+    fn test_small_magnitude_column_not_collapsed() {
+        // Genuine spread far below the absolute `f64::EPSILON` threshold must
+        // still be ranked, not treated as a constant column.
+        let vals = [1e-300, 2e-300, 3e-300, 4e-300, 5e-300];
+        let df = make_single_col(&vals);
+        let mut qt = QuantileTransformer::new().n_quantiles(5);
+        qt.fit(df.clone()).unwrap();
+        let out = qt.transform(df).unwrap();
+        let got = column_values(&out, "x");
+        let want = [0.0, 0.25, 0.5, 0.75, 1.0];
+        for (g, w) in got.iter().zip(want.iter()) {
+            assert_relative_eq!(*g, *w, epsilon = 1e-9);
+        }
+    }
+
+    #[test]
+    fn test_zero_only_column_stays_degenerate() {
+        // All-zero: span and scale are both 0, so the column is degenerate
+        // and keeps the documented mid-value.
+        let df = make_single_col(&[0.0, 0.0, 0.0]);
+        let mut qt = QuantileTransformer::new().n_quantiles(3);
+        qt.fit(df.clone()).unwrap();
+        let got = column_values(&qt.transform(df).unwrap(), "x");
+        for v in &got {
+            assert_relative_eq!(*v, 0.5, epsilon = 1e-12);
         }
     }
 
