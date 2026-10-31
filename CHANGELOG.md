@@ -100,6 +100,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `LogTransformer::method`, `columns` and `check_positive` now clear the fitted
+  state when called after `fit`, so the transformer must be refit, matching
+  `PowerTransformer`'s builders. Previously `method` kept the fit: fitting
+  `Log1p` on `[0, 1, 2]` and then switching to `Ln` transformed to
+  `[-inf, 0, 0.693]` without an error, and `inverse_transform` used the new
+  method too. `transform` and `inverse_transform` now return `Error::NotFitted`
+  until the refit, which re-runs the domain check for the new method (#208).
 - `Binarizer` now rejects input frames with no `Float64` column at both fit
   and transform time using the shared `require_f64_columns` check, so strings
   and dates no longer pass through unchanged and silently leak their dtype to
