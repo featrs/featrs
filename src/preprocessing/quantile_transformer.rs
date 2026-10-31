@@ -1,3 +1,5 @@
+//! Quantile transformation: map each feature to a uniform or normal distribution
+//! by ranking values against a fitted quantile reference grid.
 use polars::prelude::*;
 use statrs::distribution::{ContinuousCDF, Normal};
 
@@ -335,13 +337,23 @@ fn percentile_at(sorted: &[f64], q: f64) -> f64 {
     }
 }
 
+/// Whether the span `[lo, hi]` carries no spread at all.
+///
+/// No epsilon can express this: one small enough for `1e-300..5e-300` is below a
+/// single representable step at `1e16`. Equal endpoints are the only exact test,
+/// and `-0.0 == 0.0` keeps an all-zero column degenerate.
+fn is_degenerate(lo: f64, hi: f64) -> bool {
+    lo == hi
+}
+
 /// Map a single value `v` to its rank in `[0, 1]` using the quantile reference grid.
 ///
+/// - A degenerate grid (no usable spread) maps every value to `0.5`.
 /// - Values below `min_ref` map to `0.0`.
 /// - Values above `max_ref` map to `1.0`.
 /// - Values between adjacent references get a linearly interpolated rank.
 fn map_value_to_rank(v: f64, min_ref: f64, max_ref: f64, references: &[f64], n_q: usize) -> f64 {
-    if min_ref >= max_ref - f64::EPSILON {
+    if is_degenerate(min_ref, max_ref) {
         return 0.5;
     }
     if v <= min_ref {
@@ -374,13 +386,11 @@ fn map_value_to_rank(v: f64, min_ref: f64, max_ref: f64, references: &[f64], n_q
 
     let r_lo = references[lo];
     let r_hi = references[hi];
-    let span = r_hi - r_lo;
 
-    if span <= f64::EPSILON {
-        return lo as f64 / (n_q - 1) as f64;
-    }
-
-    let t = (v - r_lo) / span;
+    // `Err(i)` from the search above means `references[lo] < v < references[hi]`,
+    // so the two bounds are always distinct here and only the grid guard at the
+    // top can be degenerate.
+    let t = (v - r_lo) / (r_hi - r_lo);
     (lo as f64 + t) / (n_q - 1) as f64
 }
 
@@ -545,6 +555,57 @@ mod tests {
         // All identical values should map to the same rank
         for v in &vals {
             assert_relative_eq!(*v, 0.5, epsilon = 1e-6);
+        }
+    }
+
+    fn make_single_col(values: &[f64]) -> DataFrame {
+        let col = Column::from(Series::new("x".into(), values));
+        DataFrame::new(values.len(), vec![col]).unwrap()
+    }
+
+    #[test]
+    fn test_small_magnitude_column_not_collapsed() {
+        // Genuine spread far below the absolute `f64::EPSILON` threshold must
+        // still be ranked, not treated as a constant column.
+        let vals = [1e-300, 2e-300, 3e-300, 4e-300, 5e-300];
+        let df = make_single_col(&vals);
+        let mut qt = QuantileTransformer::new().n_quantiles(5);
+        qt.fit(df.clone()).unwrap();
+        let out = qt.transform(df).unwrap();
+        let got = column_values(&out, "x");
+        let want = [0.0, 0.25, 0.5, 0.75, 1.0];
+        for (g, w) in got.iter().zip(want.iter()) {
+            assert_relative_eq!(*g, *w, epsilon = 1e-9);
+        }
+    }
+
+    #[test]
+    fn test_large_magnitude_adjacent_values_stay_distinct() {
+        // One representable step apart at `1e16`. Exact endpoint comparison keeps
+        // these distinct; a magnitude-relative threshold (`EPSILON * 1e16` is
+        // about `2.22`, above the gap of `2.0`) would fold them into `0.5` and
+        // silently flatten the column.
+        let lo = 1e16f64;
+        let hi = lo + 2.0;
+        assert_ne!(lo, hi);
+        let df = make_single_col(&[lo, hi]);
+        let mut qt = QuantileTransformer::new().n_quantiles(2);
+        qt.fit(df.clone()).unwrap();
+        let got = column_values(&qt.transform(df).unwrap(), "x");
+        assert_relative_eq!(got[0], 0.0, epsilon = 1e-12);
+        assert_relative_eq!(got[1], 1.0, epsilon = 1e-12);
+    }
+
+    #[test]
+    fn test_zero_only_column_stays_degenerate() {
+        // All-zero, including a signed zero: `-0.0 == 0.0`, so the endpoints
+        // are still equal and the column keeps the documented mid-value.
+        let df = make_single_col(&[-0.0, 0.0, 0.0]);
+        let mut qt = QuantileTransformer::new().n_quantiles(3);
+        qt.fit(df.clone()).unwrap();
+        let got = column_values(&qt.transform(df).unwrap(), "x");
+        for v in &got {
+            assert_relative_eq!(*v, 0.5, epsilon = 1e-12);
         }
     }
 

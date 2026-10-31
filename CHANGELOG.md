@@ -118,6 +118,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   column keep their pass-through behaviour (#182). Frames that previously fit
   and transformed successfully because they held no `Float64` column at all
   now hard-error; cast them before fitting.
+- `QuantileTransformer` no longer treats a column with genuine but tiny spread
+  as constant. The degeneracy guard used an absolute `f64::EPSILON` threshold,
+  so any column whose range was below ~2.2e-16 (for example
+  `[1e-300, 2e-300, 3e-300, 4e-300, 5e-300]`) collapsed to the constant
+  mid-value `0.5` and silently dropped the feature's information. The guard is
+  now degenerate only when the endpoints are equal, so such a column ranks as
+  `[0, 0.25, 0.5, 0.75, 1]`, while a genuinely constant column (including an
+  all-zero one) keeps its documented `0.5` (#180).
 
 ## [0.5.0] - 2026-10-02
 
