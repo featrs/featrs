@@ -19,7 +19,7 @@ use crate::preprocessing::scaler::percentile_sorted;
 use crate::traits::{Error, Fit, Result, Transform};
 use crate::util::{replace_f64_column, require_f64_columns};
 use polars::prelude::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Strategy used to choose bin boundaries for each column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -406,6 +406,34 @@ impl Fit<DataFrame> for KBinsDiscretizer {
             });
         }
 
+        // Reject name collisions up front: in one-hot mode `transform` replaces
+        // each discretized column with `{column}_bin_{j}` columns and passes
+        // every other column through, so a generated name equal to a
+        // pass-through column would only fail later, inside a fitted
+        // pipeline, as an opaque duplicate-column error. (Two generated names
+        // cannot collide: each ends in `_bin_<digits>`.)
+        if self.encode != EncodeMode::Ordinal {
+            let start = usize::from(self.encode == EncodeMode::OneHotDropFirst);
+            let mut seen: HashSet<String> = x
+                .get_column_names()
+                .iter()
+                .map(|n| n.as_str().to_string())
+                .filter(|n| !cols.contains(n))
+                .collect();
+            for be in &bins {
+                for j in start..be.edges.len() - 1 {
+                    let out_name = format!("{}_bin_{j}", be.column);
+                    if !seen.insert(out_name.clone()) {
+                        return Err(Error::InvalidInput(format!(
+                            "KBinsDiscretizer.fit: generated column '{out_name}' collides with \
+                             an input column that is passed through unchanged. Rename the \
+                             conflicting input column."
+                        )));
+                    }
+                }
+            }
+        }
+
         self.bin_edges = Some(bins);
         self.fitted = true;
         Ok(())
@@ -501,6 +529,54 @@ mod tests {
 
     fn col_vals(df: &DataFrame, name: &str) -> Vec<Option<f64>> {
         df.column(name).unwrap().f64().unwrap().iter().collect()
+    }
+
+    fn onehot_kb() -> KBinsDiscretizer {
+        KBinsDiscretizer::new()
+            .n_bins(2)
+            .strategy(BinStrategy::Uniform)
+            .encode(EncodeMode::OneHot)
+    }
+
+    #[test]
+    fn test_onehot_rejects_generated_name_colliding_with_passthrough_column() {
+        let x = Column::from(Series::new("x".into(), &[1.0_f64, 2.0, 3.0, 4.0]));
+        let passthrough = Column::from(Series::new("x_bin_0".into(), &["a", "b", "c", "d"]));
+        let df = DataFrame::new(4, vec![x, passthrough]).unwrap();
+        let mut kb = onehot_kb();
+        let err = kb.fit(df).unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidInput(ref m) if m.contains("'x_bin_0'")),
+            "{err}"
+        );
+        assert!(!kb.fitted);
+    }
+
+    #[test]
+    fn test_onehot_drop_first_skips_the_dropped_name() {
+        // `x_bin_0` is dropped under OneHotDropFirst, so a pass-through column
+        // with that name does not collide.
+        let x = Column::from(Series::new("x".into(), &[1.0_f64, 2.0, 3.0, 4.0]));
+        let passthrough = Column::from(Series::new("x_bin_0".into(), &["a", "b", "c", "d"]));
+        let df = DataFrame::new(4, vec![x, passthrough]).unwrap();
+        let mut kb = onehot_kb().encode(EncodeMode::OneHotDropFirst);
+        kb.fit(df.clone()).unwrap();
+        let out = kb.transform(df).unwrap();
+        assert!(out.column("x_bin_1").is_ok());
+        assert!(out.column("x_bin_0").is_ok());
+    }
+
+    #[test]
+    fn test_onehot_discretized_column_named_like_a_bin_does_not_collide() {
+        // Both columns are discretized and replaced by their own bins, so the
+        // input `x_bin_0` is not in the output and nothing collides.
+        let x = Column::from(Series::new("x".into(), &[1.0_f64, 2.0, 3.0, 4.0]));
+        let y = Column::from(Series::new("x_bin_0".into(), &[1.0_f64, 2.0, 3.0, 4.0]));
+        let df = DataFrame::new(4, vec![x, y]).unwrap();
+        let mut kb = onehot_kb();
+        kb.fit(df.clone()).unwrap();
+        let out = kb.transform(df).unwrap();
+        assert_eq!(out.width(), 4);
     }
 
     #[test]

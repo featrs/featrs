@@ -7,6 +7,7 @@
 use crate::traits::{Error, Fit, Result, Transform};
 use crate::util::{require_f64_columns, series_mul, series_pow};
 use polars::prelude::*;
+use std::collections::HashSet;
 
 /// Generate polynomial and interaction features.
 ///
@@ -89,6 +90,31 @@ impl PolynomialFeatures {
     pub fn include_bias(mut self, value: bool) -> Self {
         self.include_bias = value;
         self
+    }
+
+    /// The output column name for one power vector, or `None` for the
+    /// all-zero vector (which `transform` skips). `fit` uses this to reject
+    /// colliding names, so it must stay the single source of truth.
+    fn term_name(power: &[usize], input_columns: &[String]) -> Option<String> {
+        // Only the all-zero power vector produces no term; `transform` skips
+        // it. An input column whose name happens to be empty still yields a
+        // (possibly empty) term name, matching the pre-refactor behaviour.
+        if power.iter().all(|&p| p == 0) {
+            return None;
+        }
+        let mut name = power
+            .iter()
+            .zip(input_columns)
+            .filter(|(p, _)| **p > 0)
+            .map(|(_, col)| col.as_str())
+            .collect::<Vec<_>>()
+            .join("_");
+        if power.iter().filter(|&&p| p > 0).count() > 1 {
+            name.push_str("_inter");
+        } else if power.iter().any(|&p| p > 1) {
+            name.push('^');
+        }
+        Some(name)
     }
 
     fn generate_powers(
@@ -222,6 +248,11 @@ impl Fit<DataFrame> for PolynomialFeatures {
     type Output = ();
 
     fn fit(&mut self, x: DataFrame) -> Result<()> {
+        // Reset state up front so a failed (re)fit cannot leave a stale
+        // column plan or fitted flag behind.
+        self.fitted = false;
+        self.input_columns = None;
+
         if x.height() == 0 || x.width() == 0 {
             return Err(Error::InvalidInput(
                 "PolynomialFeatures.fit received an empty DataFrame (0 rows or 0 columns).".into(),
@@ -236,6 +267,28 @@ impl Fit<DataFrame> for PolynomialFeatures {
                     .into(),
             ));
         }
+        // Reject name collisions up front: `transform` names each term with
+        // `term_name`, and two equal names (e.g. an input column called
+        // `a_b_inter` next to the `a * b` interaction) only fail later, inside
+        // a fitted pipeline, as an opaque duplicate-column error.
+        let powers = Self::generate_powers(col_names.len(), self.degree, self.interaction_only);
+        let mut seen: HashSet<String> = HashSet::new();
+        if self.include_bias {
+            seen.insert("bias".to_string());
+        }
+        for power in &powers {
+            if let Some(out_name) = Self::term_name(power, &col_names)
+                && !seen.insert(out_name.clone())
+            {
+                return Err(Error::InvalidInput(format!(
+                    "PolynomialFeatures.fit: generated column '{out_name}' collides with \
+                     another generated column. Output names do not encode exponents, so \
+                     degree >= 3 without interaction_only(true) always collides; otherwise \
+                     rename the conflicting input column."
+                )));
+            }
+        }
+
         self.input_columns = Some(col_names);
         self.fitted = true;
         Ok(())
@@ -271,7 +324,6 @@ impl Transform<DataFrame> for PolynomialFeatures {
         }
 
         for power in &powers {
-            let mut col_name = String::new();
             let mut has_terms = false;
             let mut series_vec: Option<Series> = None;
 
@@ -299,7 +351,6 @@ impl Transform<DataFrame> for PolynomialFeatures {
                     } else {
                         orig_series
                     });
-                    col_name = name.clone();
                     has_terms = true;
                 } else {
                     let powered = if p > 1 {
@@ -314,18 +365,10 @@ impl Transform<DataFrame> for PolynomialFeatures {
                         )
                     })?;
                     series_vec = Some(series_mul(prev, &powered, "PolynomialFeatures")?);
-                    col_name.push('_');
-                    col_name.push_str(name);
                 }
             }
 
-            if let Some(s) = series_vec {
-                if power.iter().filter(|&&p| p > 0).count() > 1 {
-                    col_name = format!("{}_inter", col_name);
-                } else if power.iter().any(|&p| p > 1) {
-                    col_name = format!("{}^", col_name);
-                }
-
+            if let (Some(s), Some(col_name)) = (series_vec, Self::term_name(power, input_columns)) {
                 let mut renamed = s.clone();
                 renamed.rename(col_name.as_str().into());
                 columns.push(Column::from(renamed));
@@ -422,6 +465,45 @@ mod tests {
         pf.fit(df.clone()).unwrap();
         let result = pf.transform(df).unwrap();
         assert_eq!(result.width(), 5);
+    }
+
+    #[test]
+    fn test_fit_rejects_generated_name_colliding_with_another() {
+        // The `a * b` interaction is named `a_b_inter`, the same as the
+        // degree-1 term for the input column `a_b_inter`.
+        let a = Column::from(Series::new("a".into(), &[1.0f64, 2.0, 3.0]));
+        let b = Column::from(Series::new("b".into(), &[4.0f64, 5.0, 6.0]));
+        let ab = Column::from(Series::new("a_b_inter".into(), &[7.0f64, 8.0, 9.0]));
+        let df = DataFrame::new(3, vec![a, b, ab]).unwrap();
+        let mut pf = PolynomialFeatures::new(2).unwrap().include_bias(false);
+        let err = pf.fit(df).unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidInput(ref m) if m.contains("'a_b_inter'")),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_fit_rejects_degree3_power_name_collision() {
+        // `a^2` and `a^3` are both named `a^`; fit says so instead of
+        // transform failing on a duplicate column.
+        let df = DataFrame::new(3, vec![make_test_df().column("a").unwrap().clone()]).unwrap();
+        let mut pf = PolynomialFeatures::new(3).unwrap();
+        let err = pf.fit(df).unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidInput(ref m) if m.contains("degree >= 3")),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_output_names_unchanged() {
+        let mut pf = PolynomialFeatures::new(2).unwrap();
+        let df = make_test_df();
+        pf.fit(df.clone()).unwrap();
+        let out = pf.transform(df).unwrap();
+        let names: Vec<&str> = out.get_column_names().iter().map(|n| n.as_str()).collect();
+        assert_eq!(names, ["bias", "b", "a", "b^", "a_b_inter", "a^"]);
     }
 
     #[test]

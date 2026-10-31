@@ -100,6 +100,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `KBinsDiscretizer.fit` (one-hot modes) and `PolynomialFeatures.fit` now
+  reject generated output names that collide, returning `Error::InvalidInput`
+  instead of fitting and then failing every `transform` with a duplicate-column
+  error. For `KBinsDiscretizer` that is a `{column}_bin_{j}` name equal to a
+  column passed through unchanged; for `PolynomialFeatures` it is two terms
+  with the same name, such as an input column `a_b_inter` next to the `a * b`
+  interaction. Because term names do not encode exponents, `PolynomialFeatures`
+  with `degree >= 3` and `interaction_only(false)` always produces such a
+  collision (`a^2` and `a^3` are both named `a^`) and now fails at `fit`
+  instead of at `transform` (#209).
 - `Binarizer` now rejects input frames with no `Float64` column at both fit
   and transform time using the shared `require_f64_columns` check, so strings
   and dates no longer pass through unchanged and silently leak their dtype to
