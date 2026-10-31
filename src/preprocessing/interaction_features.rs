@@ -186,40 +186,40 @@ impl Fit<DataFrame> for InteractionFeatures {
             ));
         }
 
-        let auto = self.columns.as_ref().map_or(true, |c| c.is_empty());
-
-        let resolved = if auto {
-            let discovered = numeric_f64_columns(&x);
-            if discovered.is_empty() {
-                let all_types: Vec<String> = x
-                    .get_column_names()
-                    .iter()
-                    .filter_map(|n| x.column(n).ok().map(|c| format!("'{n}' ({})", c.dtype())))
-                    .collect();
-                return Err(Error::InvalidInput(format!(
-                    "InteractionFeatures: no Float64 columns found. This transformer only \
-                     operates on f64 columns. Available columns: [{}]. Cast non-f64 columns \
-                     before fitting.",
-                    all_types.join(", ")
-                )));
+        let resolved = match &self.columns {
+            Some(cols) if !cols.is_empty() => {
+                for col in cols {
+                    let c = x.column(col.as_str()).map_err(|e| {
+                        Error::InvalidInput(format!(
+                            "InteractionFeatures.fit: column '{col}' not found. {e}"
+                        ))
+                    })?;
+                    if c.dtype() != &DataType::Float64 {
+                        return Err(Error::InvalidInput(format!(
+                            "InteractionFeatures.fit: column '{col}' has dtype {}; expected Float64.",
+                            c.dtype()
+                        )));
+                    }
+                }
+                cols.clone()
             }
-            discovered
-        } else {
-            let cols = self.columns.as_ref().unwrap();
-            for col in cols {
-                let c = x.column(col.as_str()).map_err(|e| {
-                    Error::InvalidInput(format!(
-                        "InteractionFeatures.fit: column '{col}' not found. {e}"
-                    ))
-                })?;
-                if c.dtype() != &DataType::Float64 {
+            _ => {
+                let discovered = numeric_f64_columns(&x);
+                if discovered.is_empty() {
+                    let all_types: Vec<String> = x
+                        .get_column_names()
+                        .iter()
+                        .filter_map(|n| x.column(n).ok().map(|c| format!("'{n}' ({})", c.dtype())))
+                        .collect();
                     return Err(Error::InvalidInput(format!(
-                        "InteractionFeatures.fit: column '{col}' has dtype {}; expected Float64.",
-                        c.dtype()
+                        "InteractionFeatures: no Float64 columns found. This transformer only \
+                         operates on f64 columns. Available columns: [{}]. Cast non-f64 columns \
+                         before fitting.",
+                        all_types.join(", ")
                     )));
                 }
+                discovered
             }
-            cols.clone()
         };
 
         self.fitted_columns = resolved;
@@ -266,7 +266,10 @@ impl Transform<DataFrame> for InteractionFeatures {
             .map(|s| s.to_string())
             .collect();
         for (i, j) in &pairs {
-            let out_name = format!("{}{}{}", self.fitted_columns[*i], NAME_SEP, self.fitted_columns[*j]);
+            let out_name = format!(
+                "{}{}{}",
+                self.fitted_columns[*i], NAME_SEP, self.fitted_columns[*j]
+            );
             if !used.insert(out_name.clone()) {
                 return Err(Error::InvalidInput(format!(
                     "{who}.transform: generated column '{out_name}' collides with an \
