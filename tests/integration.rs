@@ -150,3 +150,65 @@ fn test_end_to_end_imputer() {
         .collect();
     assert_eq!(vals, vec![1.0, 2.0, 3.0, 2.0]); // mean of [1, 3] = 2
 }
+
+#[test]
+fn failed_refit_clears_transformer_state() {
+    use featrs::traits::{Fit, Transform};
+
+    let numeric = DataFrame::new(
+        3,
+        vec![Column::from(Series::new("x".into(), &[1.0f64, 2.0, 3.0]))],
+    )
+    .unwrap();
+    let empty = DataFrame::empty();
+
+    let mut standard = featrs::preprocessing::scaler::StandardScaler::new();
+    standard.fit(numeric.clone()).unwrap();
+    assert!(standard.fit(empty.clone()).is_err());
+    assert!(standard.transform(numeric.clone()).is_err());
+
+    let mut minmax = featrs::preprocessing::scaler::MinMaxScaler::new();
+    minmax.fit(numeric.clone()).unwrap();
+    assert!(minmax.fit(empty.clone()).is_err());
+    assert!(minmax.transform(numeric.clone()).is_err());
+
+    let mut robust = featrs::preprocessing::scaler::RobustScaler::new();
+    robust.fit(numeric.clone()).unwrap();
+    assert!(robust.fit(empty.clone()).is_err());
+    assert!(robust.transform(numeric.clone()).is_err());
+
+    let mut normalizer = featrs::preprocessing::normalizer::Normalizer::l2();
+    normalizer.fit(numeric.clone()).unwrap();
+    assert!(normalizer.fit(empty.clone()).is_err());
+    assert!(normalizer.transform(numeric.clone()).is_err());
+
+    let mut quantile = featrs::preprocessing::quantile_transformer::QuantileTransformer::new();
+    quantile.fit(numeric.clone()).unwrap();
+    assert!(quantile.fit(empty.clone()).is_err());
+    assert!(quantile.transform(numeric.clone()).is_err());
+
+    let mut imputer = featrs::preprocessing::imputer::SimpleImputer::mean();
+    imputer.fit(numeric.clone()).unwrap();
+    assert!(imputer.fit(empty.clone()).is_err());
+    assert!(imputer.transform(numeric.clone()).is_err());
+
+    let mut power = featrs::preprocessing::power_transformer::PowerTransformer::new();
+    power.fit(numeric.clone()).unwrap();
+    assert!(power.fit(empty.clone()).is_err());
+    assert!(power.transform(numeric.clone()).is_err());
+
+    let mut interaction = featrs::preprocessing::interaction_features::InteractionFeatures::new();
+    interaction.fit(numeric.clone()).unwrap();
+    assert!(interaction.fit(empty.clone()).is_err());
+    assert!(interaction.transform(numeric.clone()).is_err());
+
+    let strings = DataFrame::new(
+        3,
+        vec![Column::from(Series::new("token".into(), &["a", "b", "c"]))],
+    )
+    .unwrap();
+    let mut hasher = featrs::preprocessing::feature_hasher::FeatureHasher::new(&["token"], 8);
+    hasher.fit(strings.clone()).unwrap();
+    assert!(hasher.fit(empty).is_err());
+    assert!(hasher.transform(strings).is_err());
+}

@@ -77,7 +77,11 @@ const NAME_SEP: &str = "_x_";
 /// ```
 pub struct InteractionFeatures {
     fitted: bool,
-    columns: Vec<String>,
+    /// Explicit column configuration. `None` means auto-discover at fit time.
+    /// Never mutated by `fit`; discovered columns live in `fitted_columns`.
+    columns: Option<Vec<String>>,
+    /// Columns actually used by the last successful fit.
+    fitted_columns: Vec<String>,
     include_self_products: bool,
 }
 
@@ -90,7 +94,8 @@ impl InteractionFeatures {
     pub fn new() -> Self {
         Self {
             fitted: false,
-            columns: vec![],
+            columns: None,
+            fitted_columns: vec![],
             include_self_products: false,
         }
     }
@@ -159,7 +164,8 @@ impl InteractionFeaturesBuilder {
     pub fn build(self) -> InteractionFeatures {
         InteractionFeatures {
             fitted: false,
-            columns: self.columns.unwrap_or_default(),
+            columns: self.columns,
+            fitted_columns: vec![],
             include_self_products: self.include_self_products,
         }
     }
@@ -169,44 +175,54 @@ impl Fit<DataFrame> for InteractionFeatures {
     type Output = ();
 
     fn fit(&mut self, x: DataFrame) -> Result<()> {
+        // Reset state first so a failed (re)fit cannot leave a stale column
+        // plan or fitted flag behind.
+        self.fitted = false;
+        self.fitted_columns.clear();
+
         if x.height() == 0 || x.width() == 0 {
             return Err(Error::InvalidInput(
                 "InteractionFeatures.fit received an empty DataFrame (0 rows or 0 columns).".into(),
             ));
         }
 
-        if self.columns.is_empty() {
-            let discovered = numeric_f64_columns(&x);
-            if discovered.is_empty() {
-                let all_types: Vec<String> = x
-                    .get_column_names()
-                    .iter()
-                    .filter_map(|n| x.column(n).ok().map(|c| format!("'{n}' ({})", c.dtype())))
-                    .collect();
-                return Err(Error::InvalidInput(format!(
-                    "InteractionFeatures: no Float64 columns found. This transformer only \
-                     operates on f64 columns. Available columns: [{}]. Cast non-f64 columns \
-                     before fitting.",
-                    all_types.join(", ")
-                )));
+        let resolved = match &self.columns {
+            Some(cols) if !cols.is_empty() => {
+                for col in cols {
+                    let c = x.column(col.as_str()).map_err(|e| {
+                        Error::InvalidInput(format!(
+                            "InteractionFeatures.fit: column '{col}' not found. {e}"
+                        ))
+                    })?;
+                    if c.dtype() != &DataType::Float64 {
+                        return Err(Error::InvalidInput(format!(
+                            "InteractionFeatures.fit: column '{col}' has dtype {}; expected Float64.",
+                            c.dtype()
+                        )));
+                    }
+                }
+                cols.clone()
             }
-            self.columns = discovered;
-        } else {
-            for col in &self.columns {
-                let c = x.column(col.as_str()).map_err(|e| {
-                    Error::InvalidInput(format!(
-                        "InteractionFeatures.fit: column '{col}' not found. {e}"
-                    ))
-                })?;
-                if c.dtype() != &DataType::Float64 {
+            _ => {
+                let discovered = numeric_f64_columns(&x);
+                if discovered.is_empty() {
+                    let all_types: Vec<String> = x
+                        .get_column_names()
+                        .iter()
+                        .filter_map(|n| x.column(n).ok().map(|c| format!("'{n}' ({})", c.dtype())))
+                        .collect();
                     return Err(Error::InvalidInput(format!(
-                        "InteractionFeatures.fit: column '{col}' has dtype {}; expected Float64.",
-                        c.dtype()
+                        "InteractionFeatures: no Float64 columns found. This transformer only \
+                         operates on f64 columns. Available columns: [{}]. Cast non-f64 columns \
+                         before fitting.",
+                        all_types.join(", ")
                     )));
                 }
+                discovered
             }
-        }
+        };
 
+        self.fitted_columns = resolved;
         self.fitted = true;
         Ok(())
     }
@@ -226,7 +242,7 @@ impl Transform<DataFrame> for InteractionFeatures {
 
         let mut out = x.clone();
         let who = "InteractionFeatures";
-        let n = self.columns.len();
+        let n = self.fitted_columns.len();
 
         // (i, j) index pairs into the fitted column list.
         // - default (no self products): j strictly greater than i
@@ -250,7 +266,10 @@ impl Transform<DataFrame> for InteractionFeatures {
             .map(|s| s.to_string())
             .collect();
         for (i, j) in &pairs {
-            let out_name = format!("{}{}{}", self.columns[*i], NAME_SEP, self.columns[*j]);
+            let out_name = format!(
+                "{}{}{}",
+                self.fitted_columns[*i], NAME_SEP, self.fitted_columns[*j]
+            );
             if !used.insert(out_name.clone()) {
                 return Err(Error::InvalidInput(format!(
                     "{who}.transform: generated column '{out_name}' collides with an \
@@ -261,8 +280,8 @@ impl Transform<DataFrame> for InteractionFeatures {
         }
 
         for (i, j) in pairs {
-            let name_i = &self.columns[i];
-            let name_j = &self.columns[j];
+            let name_i = &self.fitted_columns[i];
+            let name_j = &self.fitted_columns[j];
 
             let s_i = out
                 .column(name_i.as_str())
@@ -270,7 +289,7 @@ impl Transform<DataFrame> for InteractionFeatures {
                     Error::InvalidInput(format!(
                         "{who}.transform: column '{name_i}' not found. The transformer was \
                          fitted on columns: {:?}. {e}",
-                        self.columns
+                        self.fitted_columns
                     ))
                 })?
                 .as_materialized_series()
@@ -281,7 +300,7 @@ impl Transform<DataFrame> for InteractionFeatures {
                     Error::InvalidInput(format!(
                         "{who}.transform: column '{name_j}' not found. The transformer was \
                          fitted on columns: {:?}. {e}",
-                        self.columns
+                        self.fitted_columns
                     ))
                 })?
                 .as_materialized_series()
@@ -565,6 +584,7 @@ mod tests {
         let d = InteractionFeatures::default();
         let n = InteractionFeatures::new();
         assert_eq!(d.columns, n.columns);
+        assert_eq!(d.fitted_columns, n.fitted_columns);
         assert_eq!(d.include_self_products, n.include_self_products);
         assert_eq!(d.fitted, n.fitted);
     }
