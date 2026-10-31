@@ -169,6 +169,8 @@ impl Fit<DataFrame> for InteractionFeatures {
     type Output = ();
 
     fn fit(&mut self, x: DataFrame) -> Result<()> {
+        self.fitted = false;
+
         if x.height() == 0 || x.width() == 0 {
             return Err(Error::InvalidInput(
                 "InteractionFeatures.fit received an empty DataFrame (0 rows or 0 columns).".into(),

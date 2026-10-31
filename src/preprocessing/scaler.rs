@@ -82,6 +82,9 @@ impl Fit<DataFrame> for StandardScaler {
     type Output = ();
 
     fn fit(&mut self, x: DataFrame) -> Result<()> {
+        self.fitted = false;
+        self.params = None;
+
         let n_cols = x.width();
         if x.height() == 0 || n_cols == 0 {
             return Err(Error::InvalidInput(
@@ -300,6 +303,9 @@ impl Fit<DataFrame> for MinMaxScaler {
     type Output = ();
 
     fn fit(&mut self, x: DataFrame) -> Result<()> {
+        self.fitted = false;
+        self.params = None;
+
         if x.height() == 0 || x.width() == 0 {
             return Err(Error::InvalidInput(
                 "MinMaxScaler.fit received an empty DataFrame (0 rows or 0 columns). \
@@ -520,6 +526,9 @@ impl Fit<DataFrame> for RobustScaler {
     type Output = ();
 
     fn fit(&mut self, x: DataFrame) -> Result<()> {
+        self.fitted = false;
+        self.params = None;
+
         if x.height() == 0 || x.width() == 0 {
             return Err(Error::InvalidInput(
                 "RobustScaler.fit received an empty DataFrame (0 rows or 0 columns). \

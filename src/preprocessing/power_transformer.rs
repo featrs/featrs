@@ -237,6 +237,9 @@ impl Fit<DataFrame> for PowerTransformer {
     type Output = ();
 
     fn fit(&mut self, x: DataFrame) -> Result<()> {
+        self.fitted = false;
+        self.params = None;
+
         if x.height() == 0 || x.width() == 0 {
             return Err(Error::InvalidInput(
                 "PowerTransformer.fit received an empty DataFrame (0 rows or 0 columns). \

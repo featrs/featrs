@@ -76,6 +76,8 @@ impl Fit<DataFrame> for FeatureHasher {
     type Output = ();
 
     fn fit(&mut self, x: DataFrame) -> Result<()> {
+        self.fitted = false;
+
         if self.n_features == 0 {
             return Err(Error::InvalidInput(
                 "FeatureHasher: n_features must be >= 1.".into(),
