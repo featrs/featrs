@@ -162,6 +162,10 @@ fn looks_numeric(ca: &StringChunked, threshold: f64) -> bool {
 /// - other `String` with ≥ `cat_threshold` unique values → `HighCardinality` (hash)
 /// - any other dtype → `Numeric` passthrough, as before
 ///
+/// Output columns follow the fitted `DataFrame` column order: numeric columns
+/// remain in their relative positions while categorical and high-cardinality
+/// columns are replaced in-place by their encoded expansions.
+///
 /// # Example
 ///
 /// ```rust
@@ -355,14 +359,13 @@ impl Transform<DataFrame> for AutoTypeDetector {
             .encoders
             .as_ref()
             .ok_or_else(|| Error::NotFitted("AutoTypeDetector has not been fitted.".into()))?;
-        let mut parts: Vec<DataFrame> = Vec::new();
-        let mut numeric_cols: Vec<Column> = Vec::new();
+        let mut out_cols: Vec<Column> = Vec::new();
 
         for (name, ctype) in types {
             match ctype {
                 ColumnType::Numeric => {
                     if let Ok(col) = x.column(name.as_str()) {
-                        numeric_cols.push(col.clone());
+                        out_cols.push(col.clone());
                     }
                 }
                 ColumnType::Categorical | ColumnType::HighCardinality => {
@@ -388,35 +391,18 @@ impl Transform<DataFrame> for AutoTypeDetector {
                             name, e
                         ))
                     })?;
-                    if !out.columns().is_empty() {
-                        parts.push(out);
-                    }
+                    out_cols.extend(out.columns().iter().cloned());
                 }
             }
         }
 
-        if !numeric_cols.is_empty() {
-            let h = x.height();
-            parts.push(
-                DataFrame::new(h, numeric_cols).map_err(|e| Error::Computation(e.to_string()))?,
-            );
-        }
-
-        if parts.is_empty() {
+        if out_cols.is_empty() {
             return Err(Error::Computation(
                 "AutoTypeDetector produced no output columns.".into(),
             ));
         }
 
-        let mut result = parts.remove(0);
-        for other in &parts {
-            let cols = other.columns().to_vec();
-            result = result
-                .hstack(&cols)
-                .map_err(|e| Error::Computation(e.to_string()))?;
-        }
-
-        Ok(result)
+        DataFrame::new(x.height(), out_cols).map_err(|e| Error::Computation(e.to_string()))
     }
 }
 
@@ -690,5 +676,53 @@ mod tests {
         assert!(atd.fit(bad).is_err());
         assert!(atd.column_types().is_none());
         assert!(atd.transform(df).is_err());
+    }
+
+    #[test]
+    fn test_auto_type_preserves_column_order() {
+        let num = Column::from(Series::new("num".into(), &[1.0f64, 2.0, 3.0]));
+        let cat = Column::from(Series::new("cat".into(), &["a", "b", "a"]));
+        let extra = Column::from(Series::new("extra".into(), &[10.0f64, 20.0, 30.0]));
+        let df = DataFrame::new(3, vec![num, cat, extra]).unwrap();
+
+        let mut atd = AutoTypeDetector::new().cat_threshold(5);
+        atd.fit(df.clone()).unwrap();
+        let out = atd.transform(df).unwrap();
+
+        let names: Vec<String> = out
+            .get_column_names()
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+
+        assert_eq!(
+            names,
+            vec!["num", "cat_a", "cat_b", "extra"],
+            "columns must follow fit-frame order with encoded columns in-place"
+        );
+    }
+
+    #[test]
+    fn test_auto_type_preserves_column_order_high_cardinality() {
+        let num1 = Column::from(Series::new("n1".into(), &[1.0f64, 2.0, 3.0]));
+        let high = Column::from(Series::new("h".into(), &["x1", "x2", "x3"]));
+        let num2 = Column::from(Series::new("n2".into(), &[10.0f64, 20.0, 30.0]));
+        let df = DataFrame::new(3, vec![num1, high, num2]).unwrap();
+
+        let mut atd = AutoTypeDetector::new().cat_threshold(2).hash_buckets(4);
+        atd.fit(df.clone()).unwrap();
+        let out = atd.transform(df).unwrap();
+
+        let names: Vec<String> = out
+            .get_column_names()
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+
+        assert_eq!(
+            names,
+            vec!["n1", "hashed_0", "hashed_1", "hashed_2", "hashed_3", "n2"],
+            "high cardinality hashed columns must replace original column position"
+        );
     }
 }
