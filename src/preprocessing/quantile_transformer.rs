@@ -88,6 +88,10 @@ impl Fit<DataFrame> for QuantileTransformer {
     type Output = ();
 
     fn fit(&mut self, x: DataFrame) -> Result<()> {
+        // Reset state first so a failed re-fit cannot leave stale parameters.
+        self.fitted = false;
+        self.references = None;
+
         if x.height() == 0 || x.width() == 0 {
             return Err(Error::InvalidInput(
                 "QuantileTransformer.fit received an empty DataFrame (0 rows or 0 columns). \

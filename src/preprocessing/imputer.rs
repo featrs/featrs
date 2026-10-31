@@ -81,6 +81,10 @@ impl Fit<DataFrame> for SimpleImputer {
     type Output = ();
 
     fn fit(&mut self, x: DataFrame) -> Result<()> {
+        // Reset state first so a failed re-fit cannot leave stale parameters.
+        self.fitted = false;
+        self.fill_values = None;
+
         if x.height() == 0 {
             return Err(Error::InvalidInput(
                 "SimpleImputer.fit received a DataFrame with 0 rows. \

@@ -92,6 +92,9 @@ impl Fit<DataFrame> for Normalizer {
     type Output = ();
 
     fn fit(&mut self, x: DataFrame) -> Result<()> {
+        // Reset state first so a failed re-fit cannot leave stale state.
+        self.fitted = false;
+
         if x.width() == 0 {
             return Err(Error::InvalidInput(
                 "Normalizer.fit received a DataFrame with 0 columns. \
