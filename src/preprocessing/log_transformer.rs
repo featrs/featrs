@@ -160,6 +160,10 @@ impl Fit<DataFrame> for LogTransformer {
     type Output = ();
 
     fn fit(&mut self, x: DataFrame) -> Result<()> {
+        // Reset state up front so a failed (re)fit cannot leave a stale
+        // column plan or fitted flag behind, matching the builder-reset rule.
+        self.reset_fit();
+
         // 1. Validate LogBase at construction/config time
         if let LogMethod::LogBase(b) = self.method
             && (!b.is_finite() || b <= 0.0 || b == 1.0)
