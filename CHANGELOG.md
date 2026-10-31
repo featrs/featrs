@@ -100,6 +100,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `AutoTypeDetector::transform` now preserves original column ordering instead
+  of hoisting one-hot and feature-hashed columns ahead of numeric pass-through
+  columns. Output columns follow the fitted DataFrame column order, with encoded
+  expansions replacing categorical and high-cardinality columns in-place (#205).
 - `LogTransformer::method`, `columns` and `check_positive` now clear the fitted
   state when called after `fit`, so the transformer must be refit, matching
   `PowerTransformer`'s builders. Previously `method` kept the fit: fitting
