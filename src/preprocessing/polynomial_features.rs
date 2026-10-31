@@ -96,6 +96,12 @@ impl PolynomialFeatures {
     /// all-zero vector (which `transform` skips). `fit` uses this to reject
     /// colliding names, so it must stay the single source of truth.
     fn term_name(power: &[usize], input_columns: &[String]) -> Option<String> {
+        // Only the all-zero power vector produces no term; `transform` skips
+        // it. An input column whose name happens to be empty still yields a
+        // (possibly empty) term name, matching the pre-refactor behaviour.
+        if power.iter().all(|&p| p == 0) {
+            return None;
+        }
         let mut name = power
             .iter()
             .zip(input_columns)
@@ -103,9 +109,6 @@ impl PolynomialFeatures {
             .map(|(_, col)| col.as_str())
             .collect::<Vec<_>>()
             .join("_");
-        if name.is_empty() {
-            return None;
-        }
         if power.iter().filter(|&&p| p > 0).count() > 1 {
             name.push_str("_inter");
         } else if power.iter().any(|&p| p > 1) {
@@ -245,6 +248,11 @@ impl Fit<DataFrame> for PolynomialFeatures {
     type Output = ();
 
     fn fit(&mut self, x: DataFrame) -> Result<()> {
+        // Reset state up front so a failed (re)fit cannot leave a stale
+        // column plan or fitted flag behind.
+        self.fitted = false;
+        self.input_columns = None;
+
         if x.height() == 0 || x.width() == 0 {
             return Err(Error::InvalidInput(
                 "PolynomialFeatures.fit received an empty DataFrame (0 rows or 0 columns).".into(),
