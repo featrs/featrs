@@ -104,14 +104,23 @@ impl LogTransformer {
     ///
     /// Each column must exist in the frame passed to `fit` and have dtype
     /// `Float64`; otherwise `fit` returns [`Error::InvalidInput`].
+    ///
+    /// Calling this after [`fit`](Fit::fit) clears the fitted state, so the
+    /// transformer must be refit before use.
     pub fn columns(mut self, cols: &[&str]) -> Self {
         self.columns = Some(cols.iter().map(|s| s.to_string()).collect());
+        self.reset_fit();
         self
     }
 
     /// Set the logarithmic method (default: [`LogMethod::Log1p`]).
+    ///
+    /// Calling this after [`fit`](Fit::fit) clears the fitted state: the domain
+    /// check ran for the old method, so the transformer must be refit before
+    /// use.
     pub fn method(mut self, m: LogMethod) -> Self {
         self.method = m;
+        self.reset_fit();
         self
     }
 
@@ -124,9 +133,20 @@ impl LogTransformer {
     /// When `false`, no validation is performed — out-of-domain values produce
     /// `NaN`/`-Inf` at [`transform`](Transform::transform) time via standard
     /// `f64` semantics.
+    ///
+    /// Calling this after [`fit`](Fit::fit) clears the fitted state, so the
+    /// transformer must be refit before use.
     pub fn check_positive(mut self, b: bool) -> Self {
         self.check_positive = b;
+        self.reset_fit();
         self
+    }
+
+    /// Drop the fitted state so a changed configuration cannot reuse columns
+    /// validated under the previous one.
+    fn reset_fit(&mut self) {
+        self.fitted = false;
+        self.fitted_columns.clear();
     }
 }
 
@@ -140,6 +160,10 @@ impl Fit<DataFrame> for LogTransformer {
     type Output = ();
 
     fn fit(&mut self, x: DataFrame) -> Result<()> {
+        // Reset state up front so a failed (re)fit cannot leave a stale
+        // column plan or fitted flag behind, matching the builder-reset rule.
+        self.reset_fit();
+
         // 1. Validate LogBase at construction/config time
         if let LogMethod::LogBase(b) = self.method
             && (!b.is_finite() || b <= 0.0 || b == 1.0)
@@ -361,6 +385,31 @@ mod tests {
     use super::*;
     use approx::assert_relative_eq;
     use std::f64::consts::E;
+
+    #[test]
+    fn test_builder_after_fit_requires_refit() {
+        let col = Column::from(Series::new("x".into(), &[0.0f64, 1.0, 2.0]));
+        let df = DataFrame::new(3, vec![col]).unwrap();
+        let fitted = || {
+            let mut t = LogTransformer::new();
+            t.fit(df.clone()).unwrap();
+            t
+        };
+
+        // `0.0` is valid for Log1p but not for Ln: switching the method must
+        // not reuse the Log1p validation and produce `-inf`.
+        let mut ln = fitted().method(LogMethod::Ln);
+        assert!(matches!(ln.transform(df.clone()), Err(Error::NotFitted(_))));
+        assert!(matches!(
+            ln.inverse_transform(df.clone()),
+            Err(Error::NotFitted(_))
+        ));
+        assert!(matches!(ln.fit(df.clone()), Err(Error::InvalidInput(_))));
+
+        for t in [fitted().columns(&["x"]), fitted().check_positive(false)] {
+            assert!(matches!(t.transform(df.clone()), Err(Error::NotFitted(_))));
+        }
+    }
 
     #[test]
     fn test_log1p_values() {
