@@ -100,6 +100,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `PolynomialFeatures.transform` now carries columns of other dtypes (an
+  identifier, a label) through unchanged, after the generated features, as
+  `KBinsDiscretizer` does. Previously it returned only the generated features,
+  so `[a (f64), label (str)]` came back as `[a, a^]` with the label silently
+  dropped. A carried-through column whose name equals a generated one is
+  rejected with `Error::InvalidInput` (at `fit`, and at `transform` for a
+  column that only appears then) (#207).
 - `AutoTypeDetector::transform` now preserves original column ordering instead
   of hoisting one-hot and feature-hashed columns ahead of numeric pass-through
   columns. Output columns follow the fitted DataFrame column order, with encoded

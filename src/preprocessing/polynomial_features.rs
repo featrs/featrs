@@ -15,6 +15,10 @@ use std::collections::HashSet;
 /// features. For example, with `degree=2` and inputs `[a, b]`, the output
 /// includes `[a, b, a², a·b, b²]` plus an optional bias term.
 ///
+/// Only `Float64` columns are expanded; columns of other dtypes (an
+/// identifier, a label) are preserved unchanged in the output, after the
+/// generated features.
+///
 /// # Example
 ///
 /// ```rust
@@ -289,6 +293,17 @@ impl Fit<DataFrame> for PolynomialFeatures {
             }
         }
 
+        // A column passed through unchanged must not share a name with a
+        // generated one, or every `transform` fails on a duplicate column.
+        for name in x.get_column_names() {
+            if !col_names.iter().any(|c| c == name.as_str()) && seen.contains(name.as_str()) {
+                return Err(Error::InvalidInput(format!(
+                    "PolynomialFeatures.fit: column '{name}', passed through unchanged, \
+                     collides with a generated column. Rename the input column."
+                )));
+            }
+        }
+
         self.input_columns = Some(col_names);
         self.fitted = true;
         Ok(())
@@ -381,6 +396,23 @@ impl Transform<DataFrame> for PolynomialFeatures {
                  Ensure degree >= 1 and the input has at least one f64 column."
                     .into(),
             ));
+        }
+
+        // Columns that were not expanded (other dtypes) are carried through
+        // unchanged, in input order, after the generated features.
+        let generated: HashSet<String> = columns.iter().map(|c| c.name().to_string()).collect();
+        for col in x.columns() {
+            let name = col.name().as_str();
+            if input_columns.iter().any(|c| c == name) {
+                continue;
+            }
+            if generated.contains(name) {
+                return Err(Error::InvalidInput(format!(
+                    "PolynomialFeatures.transform: column '{name}', passed through unchanged, \
+                     collides with a generated column. Rename the input column."
+                )));
+            }
+            columns.push(col.clone());
         }
 
         DataFrame::new(n_rows, columns)
@@ -504,6 +536,58 @@ mod tests {
         let out = pf.transform(df).unwrap();
         let names: Vec<&str> = out.get_column_names().iter().map(|n| n.as_str()).collect();
         assert_eq!(names, ["bias", "b", "a", "b^", "a_b_inter", "a^"]);
+    }
+
+    fn df_with_label() -> DataFrame {
+        let a = Column::from(Series::new("a".into(), &[1.0f64, 2.0, 3.0]));
+        let label = Column::from(Series::new("label".into(), &["x", "y", "z"]));
+        let id = Column::from(Series::new("id".into(), &[10i64, 20, 30]));
+        DataFrame::new(3, vec![a, label, id]).unwrap()
+    }
+
+    #[test]
+    fn test_non_f64_columns_are_preserved_unchanged() {
+        let df = df_with_label();
+        let mut pf = PolynomialFeatures::new(2).unwrap().include_bias(false);
+        pf.fit(df.clone()).unwrap();
+        let out = pf.transform(df.clone()).unwrap();
+        let names: Vec<&str> = out.get_column_names().iter().map(|n| n.as_str()).collect();
+        assert_eq!(names, ["a", "a^", "label", "id"]);
+        assert!(
+            out.column("label")
+                .unwrap()
+                .equals(df.column("label").unwrap())
+        );
+        assert!(out.column("id").unwrap().equals(df.column("id").unwrap()));
+        assert_eq!(out.column("id").unwrap().dtype(), &DataType::Int64);
+    }
+
+    #[test]
+    fn test_fit_rejects_passthrough_name_colliding_with_generated() {
+        let a = Column::from(Series::new("a".into(), &[1.0f64, 2.0, 3.0]));
+        let clash = Column::from(Series::new("a^".into(), &["x", "y", "z"]));
+        let df = DataFrame::new(3, vec![a, clash]).unwrap();
+        let mut pf = PolynomialFeatures::new(2).unwrap().include_bias(false);
+        let err = pf.fit(df).unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidInput(ref m) if m.contains("'a^'") && m.contains("collides")),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_transform_rejects_passthrough_name_colliding_with_generated() {
+        let mut pf = PolynomialFeatures::new(2).unwrap();
+        pf.fit(df_with_label()).unwrap();
+        let a = Column::from(Series::new("a".into(), &[1.0f64, 2.0, 3.0]));
+        let bias = Column::from(Series::new("bias".into(), &["x", "y", "z"]));
+        let err = pf
+            .transform(DataFrame::new(3, vec![a, bias]).unwrap())
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidInput(ref m) if m.contains("'bias'")),
+            "{err}"
+        );
     }
 
     #[test]
