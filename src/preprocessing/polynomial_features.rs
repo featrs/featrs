@@ -15,9 +15,10 @@ use std::collections::HashSet;
 /// features. For example, with `degree=2` and inputs `[a, b]`, the output
 /// includes `[a, b, a², a·b, b²]` plus an optional bias term.
 ///
-/// Only `Float64` columns are expanded; columns of other dtypes (an
-/// identifier, a label) are preserved unchanged in the output, after the
-/// generated features.
+/// Only the `Float64` columns seen at fit are expanded. Every other column
+/// (an identifier, a label, or a column that only appears at transform) is
+/// preserved unchanged in the output, after the generated features, as
+/// `KBinsDiscretizer` does.
 ///
 /// # Example
 ///
@@ -588,6 +589,32 @@ mod tests {
             matches!(err, Error::InvalidInput(ref m) if m.contains("'bias'")),
             "{err}"
         );
+    }
+
+    #[test]
+    fn test_transform_passes_through_float64_column_not_seen_at_fit() {
+        let mut pf = PolynomialFeatures::new(2).unwrap().include_bias(false);
+        pf.fit(df_with_label()).unwrap();
+        let mut df = df_with_label();
+        df.with_column(Column::from(Series::new("b".into(), &[4.0f64, 5.0, 6.0])))
+            .unwrap();
+        let out = pf.transform(df.clone()).unwrap();
+        let names: Vec<&str> = out.get_column_names().iter().map(|n| n.as_str()).collect();
+        assert_eq!(names, ["a", "a^", "label", "id", "b"]);
+        assert!(out.column("b").unwrap().equals(df.column("b").unwrap()));
+    }
+
+    #[test]
+    fn test_transform_passes_through_column_whose_dtype_changed() {
+        let mut pf = PolynomialFeatures::new(2).unwrap().include_bias(false);
+        pf.fit(df_with_label()).unwrap();
+        let a = Column::from(Series::new("a".into(), &[1.0f64, 2.0, 3.0]));
+        let id = Column::from(Series::new("id".into(), &[10.0f64, 20.0, 30.0]));
+        let df = DataFrame::new(3, vec![a, id]).unwrap();
+        let out = pf.transform(df.clone()).unwrap();
+        let names: Vec<&str> = out.get_column_names().iter().map(|n| n.as_str()).collect();
+        assert_eq!(names, ["a", "a^", "id"]);
+        assert!(out.column("id").unwrap().equals(df.column("id").unwrap()));
     }
 
     #[test]
