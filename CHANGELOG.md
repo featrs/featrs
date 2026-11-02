@@ -107,6 +107,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dropped. A carried-through column whose name equals a generated one is
   rejected with `Error::InvalidInput` (at `fit`, and at `transform` for a
   column that only appears then) (#207).
+- `MissingIndicator` now rejects generated indicator column names that collide
+  with existing input columns or other planned indicator columns, returning
+  `Error::InvalidInput` at `fit` and `transform` instead of silently
+  overwriting user columns with Polars' `with_column` (#196).
 - `AutoTypeDetector::transform` now preserves original column ordering instead
   of hoisting one-hot and feature-hashed columns ahead of numeric pass-through
   columns. Output columns follow the fitted DataFrame column order, with encoded
