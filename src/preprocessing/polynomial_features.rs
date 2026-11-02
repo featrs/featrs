@@ -17,8 +17,7 @@ use std::collections::HashSet;
 ///
 /// Only the `Float64` columns seen at fit are expanded. Every other column
 /// (an identifier, a label, or a column that only appears at transform) is
-/// preserved unchanged in the output, after the generated features, as
-/// `KBinsDiscretizer` does.
+/// preserved unchanged in the output, after the generated features.
 ///
 /// # Example
 ///
