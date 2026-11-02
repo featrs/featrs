@@ -390,14 +390,6 @@ impl Transform<DataFrame> for PolynomialFeatures {
             }
         }
 
-        if columns.is_empty() {
-            return Err(Error::Computation(
-                "PolynomialFeatures: no features were generated. \
-                 Ensure degree >= 1 and the input has at least one f64 column."
-                    .into(),
-            ));
-        }
-
         // Columns that were not expanded (other dtypes) are carried through
         // unchanged, in input order, after the generated features.
         let generated: HashSet<String> = columns.iter().map(|c| c.name().to_string()).collect();
@@ -413,6 +405,17 @@ impl Transform<DataFrame> for PolynomialFeatures {
                 )));
             }
             columns.push(col.clone());
+        }
+
+        // Checked after passthrough: a configuration that generates no terms
+        // (e.g. interaction_only(true) with a single f64 column and no bias)
+        // still has the pass-through columns to return.
+        if columns.is_empty() {
+            return Err(Error::Computation(
+                "PolynomialFeatures: no features were generated and no columns were passed \
+                 through. Ensure degree >= 1 and the input has at least one f64 column."
+                    .into(),
+            ));
         }
 
         DataFrame::new(n_rows, columns)
@@ -614,6 +617,31 @@ mod tests {
         let names: Vec<&str> = out.get_column_names().iter().map(|n| n.as_str()).collect();
         assert_eq!(names, ["a", "a^", "id"]);
         assert!(out.column("id").unwrap().equals(df.column("id").unwrap()));
+    }
+
+    #[test]
+    fn test_passthrough_survives_no_generated_terms() {
+        // interaction_only(true) with a single f64 column yields no terms, and
+        // include_bias(false) leaves output empty. The label must still come
+        // through instead of tripping the "no features" error.
+        let mut pf = PolynomialFeatures::new(2)
+            .unwrap()
+            .include_bias(false)
+            .interaction_only(true);
+        let a = Column::from(Series::new("a".into(), &[1.0f64, 2.0, 3.0]));
+        let label = Column::from(Series::new("label".into(), &["x", "y", "z"]));
+        let df = DataFrame::new(3, vec![a, label]).unwrap();
+        pf.fit(df.clone()).unwrap();
+
+        let out = pf.transform(df.clone()).unwrap();
+
+        let names: Vec<&str> = out.get_column_names().iter().map(|n| n.as_str()).collect();
+        assert_eq!(names, ["label"]);
+        assert!(
+            out.column("label")
+                .unwrap()
+                .equals(df.column("label").unwrap())
+        );
     }
 
     #[test]
