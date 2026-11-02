@@ -298,7 +298,8 @@ impl Transform<DataFrame> for OneHotEncoder {
             for cat in cats {
                 // Every category of this column is dropped by `drop_first`, so
                 // it emits nothing and is not required in the transform input.
-                if cat.categories.len() <= start {
+                // When it is present, its values are still checked.
+                if cat.categories.len() <= start && x.column(&cat.column).is_err() {
                     continue;
                 }
                 let ca = fitted_series(&x, &cat.column, &fitted_columns)?;
@@ -1622,6 +1623,35 @@ mod tests {
 
         // Sorted categories are ["blue", "red"] -> only "color_red" survives.
         assert_eq!(result.width(), 1);
+    }
+
+    #[test]
+    fn test_one_hot_column_fully_dropped_by_drop_first_still_rejects_unseen() {
+        // The dropped column is not required, but when it is present an unseen
+        // value must still be rejected under the strict policy (#204).
+        let train = DataFrame::new(
+            2,
+            vec![
+                Column::from(Series::new("constant".into(), &["only", "only"])),
+                Column::from(Series::new("color".into(), &["red", "blue"])),
+            ],
+        )
+        .unwrap();
+        let mut enc = OneHotEncoder::new().drop_first(true);
+        enc.fit(train).unwrap();
+
+        let test = DataFrame::new(
+            2,
+            vec![
+                Column::from(Series::new("constant".into(), &["mauve", "mauve"])),
+                Column::from(Series::new("color".into(), &["red", "blue"])),
+            ],
+        )
+        .unwrap();
+        match enc.transform(test).unwrap_err() {
+            Error::InvalidInput(msg) => assert!(msg.contains("mauve"), "got: {msg}"),
+            other => panic!("expected Error::InvalidInput, got {other:?}"),
+        }
     }
 
     #[test]
