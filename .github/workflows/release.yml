@@ -2,34 +2,69 @@ name: Release
 
 on:
   push:
-    tags:
-      - "v*"
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-plz-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   release:
-    name: Create GitHub Release
+    name: Publish to crates.io
     runs-on: ubuntu-latest
+    if: github.repository_owner == 'featrs'
     permissions:
       contents: write
+      pull-requests: read
 
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Extract changelog entry
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          if grep -q "^## \\[${VERSION}\\]" CHANGELOG.md; then
-            awk -v ver="$VERSION" '
-              $0 ~ "^## \\[" ver "\\]" { flag=1; next }
-              flag && /^## \[/ { exit }
-              flag
-            ' CHANGELOG.md > /tmp/release-notes.md
-          else
-            : > /tmp/release-notes.md
-          fi
-
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
+      - name: Checkout repository
+        uses: actions/checkout@v4
         with:
-          body_path: /tmp/release-notes.md
-          generate_release_notes: true
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run release-plz release
+        uses: release-plz/action@v0.5
+        with:
+          command: release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  release-pr:
+    name: Open release PR
+    runs-on: ubuntu-latest
+    if: github.repository_owner == 'featrs'
+    permissions:
+      contents: write
+      pull-requests: write
+    concurrency:
+      group: release-plz-pr-${{ github.ref }}
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run release-plz release-pr
+        uses: release-plz/action@v0.5
+        with:
+          command: release-pr
+        env:
+          # A PAT is needed so CI runs on the release PR. GITHUB_TOKEN-created
+          # PRs do not trigger other workflows.
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN || secrets.GITHUB_TOKEN }}
