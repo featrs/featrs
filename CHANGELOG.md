@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0](https://github.com/featrs/featrs/compare/v0.5.0...v0.6.0) - 2026-11-04
+
+### Added
+
+- add InverseTransform trait with scaler, log, power and quantile inverses
+- add AutoScaler — pick a scaling strategy per column from the data ([#176](https://github.com/featrs/featrs/pull/176))
+- unify empty-frame and configuration validation in the composition layer ([#174](https://github.com/featrs/featrs/pull/174))
+
+### Binarizer
+
+- reject non-Float64 input instead of leaking dtypes ([#189](https://github.com/featrs/featrs/pull/189))
+
+### Changed
+
+- *(interaction_features)* separate explicit config from auto-discovered columns
+- use reset_fit in fit for consistency
+- drop the unreachable interpolation guard and add module docs
+
+### Fixed
+
+- *(encoder)* reject unseen values in a fully dropped OneHotEncoder column ([#217](https://github.com/featrs/featrs/pull/217))
+- *(auto_type)* reject a 0-column frame at fit ([#218](https://github.com/featrs/featrs/pull/218))
+- *(preprocessing)* keep passthrough when no terms are generated
+- reject colliding {col}_missing column names in MissingIndicator
+- clippy (fmt, is_none_or, unwrap) on interaction_features refactor
+- clear transformer state before refit
+- *(preprocessing)* preserve column order in AutoTypeDetector
+- clear fit state and preserve empty-named columns in PolynomialFeatures
+- *(preprocessing)* clear LogTransformer's fit when a builder is called after fit
+- *(preprocessing)* reject colliding generated names at fit in KBins and Polynomial
+- treat only equal endpoints as a degenerate spread
+- use a scale-relative spread test in QuantileTransformer
+- *(preprocessing)* guard against variance and norm overflow on extreme inputs ([#186](https://github.com/featrs/featrs/pull/186))
+
 ### Added
 
 - `InverseTransform<X>` in `src/traits/inverse.rs` reverses an invertible
