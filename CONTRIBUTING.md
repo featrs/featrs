@@ -35,26 +35,30 @@ cargo test
 
 ## Releases
 
-Releases are automated with [release-plz](https://release-plz.dev):
+Releases follow the GitHub milestones:
 
-1. Every push to `main` opens or updates a release PR. It bumps the version in
-   `Cargo.toml` and adds a `CHANGELOG.md` entry from the conventional commits.
-2. Review the release PR. Edit the changelog entry if it needs more detail.
-3. Merge the release PR. The `Release` workflow then publishes the crate to
-   crates.io, pushes the `vX.Y.Z` tag, and creates the GitHub release.
+- **Nightly** (patch, `0.x.y`): the `Nightly release` workflow runs daily at
+  03:00 UTC. If `main` has code changes since the last tag, it bumps the patch
+  version, tags it, publishes to crates.io, and creates a GitHub prerelease.
+  Nightlies are regular crates.io versions but are marked as prereleases on
+  GitHub.
+- **Minor** (`0.x.0`) and **LTS** (`x.0.0`): close the matching GitHub
+  milestone, for example `v0.6.0 - Pipeline Composition & Automation` or
+  `v1.0.0 - Production Readiness`. The `Milestone release` workflow bumps to
+  the milestone version, tags it, publishes to crates.io, and creates the
+  GitHub release.
+- **Release metadata**: after a milestone release, the workflow opens a
+  `chore: sync vX.Y.Z release metadata` PR and dispatches CI on its branch. If
+  branch protection permits, it merges automatically; otherwise merge it once
+  CI passes. The next milestone release refuses to run until this PR is merged,
+  because its changelog would otherwise duplicate the previous release.
 
-Do not bump the version or push release tags by hand.
+Milestone titles must start with a version: `v0.6.0`, `0.6.0`, `v1.0.0`, etc.
+Patch milestones (`0.6.1`) are rejected; patch releases are automated
+nightlies. To publish a nightly on demand, run the `Nightly release` workflow
+manually. To retry a failed milestone release, run the `Milestone release`
+workflow manually with the milestone number.
 
-Repository secrets used by the workflow:
-
-- **`CARGO_REGISTRY_TOKEN`** (configured): a crates.io API token with
-  `publish-new` and `publish-update` scopes.
-- **`RELEASE_PLZ_TOKEN`** (recommended): a fine-grained PAT with
-  `contents: write` and `pull-requests: write` on this repository. Without it
-  the workflow falls back to `GITHUB_TOKEN`, but CI will not run on the release
-  PR because GitHub suppresses workflow runs for `GITHUB_TOKEN`-created PRs.
-
-To switch to crates.io trusted publishing later, remove the
-`CARGO_REGISTRY_TOKEN` environment variable from `.github/workflows/release.yml`,
-add `id-token: write` to the `release` job permissions, and configure the
-trusted publisher on crates.io.
+Do not bump `Cargo.toml`, edit a release section by hand, or push `v*` tags
+manually. The workflows use the `CARGO_REGISTRY_TOKEN` repository secret, a
+crates.io API token with `publish-new` and `publish-update` scopes.
