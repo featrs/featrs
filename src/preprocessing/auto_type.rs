@@ -267,6 +267,14 @@ impl Fit<DataFrame> for AutoTypeDetector {
             )));
         }
 
+        if x.width() == 0 {
+            return Err(Error::InvalidInput(
+                "AutoTypeDetector.fit received a DataFrame with 0 columns. \
+                 Provide at least one column to detect."
+                    .into(),
+            ));
+        }
+
         let mut types = Vec::new();
         let mut encoders: Vec<(String, Box<dyn DataFrameTransformer>)> = Vec::new();
 
@@ -657,6 +665,17 @@ mod tests {
             );
             assert!(atd.transform(string_df("s", &["1.5"])).is_err());
         }
+    }
+
+    #[test]
+    fn test_zero_column_frame_is_rejected_at_fit() {
+        let mut atd = AutoTypeDetector::new();
+        let err = atd.fit(DataFrame::empty()).unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidInput(ref msg) if msg.contains("0 columns")),
+            "got {err:?}"
+        );
+        assert!(atd.column_types().is_none());
     }
 
     #[test]
