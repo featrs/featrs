@@ -186,6 +186,9 @@ impl OneHotEncoder {
     ///
     /// When `true`, the first category (alphabetically) is omitted from the
     /// output, producing `k-1` columns for a feature with `k` categories.
+    /// A column fitted with a single category then emits nothing, so
+    /// `transform` accepts a frame without it, while
+    /// [`required_schema`](RequiresSchema::required_schema) still lists it.
     pub fn drop_first(mut self, value: bool) -> Self {
         self.drop_first = value;
         self
@@ -298,7 +301,8 @@ impl Transform<DataFrame> for OneHotEncoder {
             for cat in cats {
                 // Every category of this column is dropped by `drop_first`, so
                 // it emits nothing and is not required in the transform input.
-                if cat.categories.len() <= start {
+                // When it is present, its values are still checked.
+                if cat.categories.len() <= start && x.column(&cat.column).is_err() {
                     continue;
                 }
                 let ca = fitted_series(&x, &cat.column, &fitted_columns)?;
@@ -1222,6 +1226,11 @@ impl Transform<DataFrame> for BinaryEncoder {
 
 /// `OneHotEncoder::fit` reads every column as `String`; after fitting, the
 /// columns it learned must still be there.
+///
+/// The fitted spec lists every fitted column, including one that
+/// [`drop_first`](OneHotEncoder::drop_first) leaves with no output column, so
+/// [`validate_schema`](crate::traits::schema::validate_schema) is stricter than
+/// `transform`, which tolerates that column being missing.
 impl RequiresSchema for OneHotEncoder {
     fn required_schema(&self) -> SchemaSpec {
         match &self.categories {
@@ -1618,10 +1627,46 @@ mod tests {
             vec![Column::from(Series::new("color".into(), &["red", "blue"]))],
         )
         .unwrap();
+        // Schema validation stays stricter than transform: the fitted spec
+        // still lists the dropped column.
+        let msg = crate::traits::schema::validate_schema(&enc.required_schema(), &test)
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("Missing column 'constant'"), "message: {msg}");
+
         let result = enc.transform(test).unwrap();
 
         // Sorted categories are ["blue", "red"] -> only "color_red" survives.
         assert_eq!(result.width(), 1);
+    }
+
+    #[test]
+    fn test_one_hot_column_fully_dropped_by_drop_first_still_rejects_unseen() {
+        // The dropped column is not required, but when it is present an unseen
+        // value must still be rejected under the strict policy (#204).
+        let train = DataFrame::new(
+            2,
+            vec![
+                Column::from(Series::new("constant".into(), &["only", "only"])),
+                Column::from(Series::new("color".into(), &["red", "blue"])),
+            ],
+        )
+        .unwrap();
+        let mut enc = OneHotEncoder::new().drop_first(true);
+        enc.fit(train).unwrap();
+
+        let test = DataFrame::new(
+            2,
+            vec![
+                Column::from(Series::new("constant".into(), &["mauve", "mauve"])),
+                Column::from(Series::new("color".into(), &["red", "blue"])),
+            ],
+        )
+        .unwrap();
+        match enc.transform(test).unwrap_err() {
+            Error::InvalidInput(msg) => assert!(msg.contains("mauve"), "got: {msg}"),
+            other => panic!("expected Error::InvalidInput, got {other:?}"),
+        }
     }
 
     #[test]
