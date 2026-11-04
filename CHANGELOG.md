@@ -321,6 +321,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   do not contribute to the accumulator but keep their row position in the
   output, and `min_periods` (default `1`) controls how many non-null
   observations are required before a value is produced (#62).
+- `DatetimeFeatures` for extracting calendar components (`Year`, `Month`,
+  `Day`, `Hour`, `Minute`, `Second`, `Weekday`, `DayOfYear`, `WeekOfYear`,
+  `Quarter`, `IsWeekend`) from `Date`/`Datetime` columns into new columns
+  named `{col}_{component}` (`Int32`, except the weekend flag which is
+  `Float64`). Columns auto-discover when unspecified; empty component lists
+  default to `Year`/`Month`/`Day`; weekday is 0-based (`0 = Monday`) and the
+  weekend flag marks Saturday/Sunday; nulls propagate; `Date` columns
+  zero-fill time-of-day components; generated-name collisions with input
+  columns are rejected at fit and transform. (#59).
+- `KBinsDiscretizer` for binning continuous `Float64` features into discrete
+  bins using one of three strategies — equal-width (`Uniform`), equal-population
+  (`Quantile`), or 1-D k-means (`KMeans`) — and encoding each bin either as an
+  ordinal integer column or as one-hot binary columns (optionally dropping the
+  first bin to avoid multicollinearity). Non-`Float64` columns pass through,
+  out-of-range transform values are clipped to the nearest bin, and columns
+  with fewer distinct values than requested bins naturally collapse to fewer
+  bins. Missing values are mode-specific: `Ordinal` keeps `null` as `null` and
+  emits non-finite inputs as `NaN`, while the one-hot modes encode both as
+  all-zero bin columns. (#50).
+- `CorrelationThreshold` for removing features that are highly correlated with
+  other features, keeping the first (in input order) column from each group of
+  mutually correlated columns above a configurable absolute-correlation
+  threshold. Supports Pearson and Spearman correlation methods. Non-`Float64`
+  columns pass through (are dropped from the output); null/`NaN` values are
+  skipped pairwise; undefined correlations (e.g. constant columns) are treated
+  as zero so such columns are kept (at threshold `0.0` they are dropped like
+  any other). (#51).
 
 ### Fixed
 
@@ -345,40 +372,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   silently becoming `0.0`. Non-finite thresholds (`NaN`, ±`Inf`) are rejected
   at fit time with `Error::InvalidInput` — previously every value silently
   binarized to `0.0` under a `NaN` threshold (#141).
-
-## [0.4.0] - 2026-08-22
-
-### Added
-
-- `DatetimeFeatures` for extracting calendar components (`Year`, `Month`,
-  `Day`, `Hour`, `Minute`, `Second`, `Weekday`, `DayOfYear`, `WeekOfYear`,
-  `Quarter`, `IsWeekend`) from `Date`/`Datetime` columns into new columns
-  named `{col}_{component}` (`Int32`, except the weekend flag which is
-  `Float64`). Columns auto-discover when unspecified; empty component lists
-  default to `Year`/`Month`/`Day`; weekday is 0-based (`0 = Monday`) and the
-  weekend flag marks Saturday/Sunday; nulls propagate; `Date` columns
-  zero-fill time-of-day components; generated-name collisions with input
-  columns are rejected at fit and transform. (#59).
-
-- `KBinsDiscretizer` for binning continuous `Float64` features into discrete
-  bins using one of three strategies — equal-width (`Uniform`), equal-population
-  (`Quantile`), or 1-D k-means (`KMeans`) — and encoding each bin either as an
-  ordinal integer column or as one-hot binary columns (optionally dropping the
-  first bin to avoid multicollinearity). Non-`Float64` columns pass through,
-  out-of-range transform values are clipped to the nearest bin, and columns
-  with fewer distinct values than requested bins naturally collapse to fewer
-  bins. Missing values are mode-specific: `Ordinal` keeps `null` as `null` and
-  emits non-finite inputs as `NaN`, while the one-hot modes encode both as
-  all-zero bin columns. (#50).
-
-- `CorrelationThreshold` for removing features that are highly correlated with
-  other features, keeping the first (in input order) column from each group of
-  mutually correlated columns above a configurable absolute-correlation
-  threshold. Supports Pearson and Spearman correlation methods. Non-`Float64`
-  columns pass through (are dropped from the output); null/`NaN` values are
-  skipped pairwise; undefined correlations (e.g. constant columns) are treated
-  as zero so such columns are kept (at threshold `0.0` they are dropped like
-  any other). (#51).
 
 ## [0.3.7] - 2026-08-20
 
