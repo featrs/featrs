@@ -1,0 +1,153 @@
+name: Nightly release
+
+on:
+  schedule:
+    # 03:00 UTC every day.
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Prepare nightly
+    runs-on: ubuntu-latest
+    outputs:
+      release: ${{ steps.version.outputs.release }}
+      bump: ${{ steps.version.outputs.bump }}
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
+
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-edit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-edit
+
+      - name: Decide nightly version
+        id: version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          git fetch --tags --force
+
+          # Use all tags, not `git describe`: nightly tags live on synthetic
+          # commits that are not reachable from main.
+          latest_tag=$(git tag --sort=-v:refname | head -n1 || true)
+          if [ -n "$latest_tag" ]; then
+            changed=$(git diff --name-only "$latest_tag"..HEAD \
+              | grep -Ev '^(Cargo\.toml|Cargo\.lock|CHANGELOG\.md|.*\.md|\.github/|docs/)' \
+              || true)
+            if [ -z "$changed" ]; then
+              latest_version=${latest_tag#v}
+              published=false
+              status=$(curl -sS -o /dev/null -w '%{http_code}' \
+                -H 'User-Agent: featrs-release-workflow (https://github.com/featrs/featrs)' \
+                "https://crates.io/api/v1/crates/featrs/$latest_version")
+              if [ "$status" = "200" ]; then
+                published=true
+              fi
+
+              released=false
+              if gh release view "$latest_tag" >/dev/null 2>&1; then
+                released=true
+              fi
+
+              if [ "$published" = true ] && [ "$released" = true ]; then
+                echo "No code changes and $latest_tag is fully published; skipping nightly."
+                echo "release=false" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+
+              if [ "$published" = true ] && [ "$released" = false ]; then
+                echo "No code changes, but $latest_tag has no GitHub release; retrying the release only."
+                {
+                  echo "release=true"
+                  echo "bump=false"
+                  echo "version=$latest_version"
+                  echo "tag=$latest_tag"
+                } >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+
+              echo "No code changes, but $latest_tag is not on crates.io; retrying the publish."
+            fi
+          fi
+
+          latest=$(curl -fsSL \
+            -H 'User-Agent: featrs-release-workflow (https://github.com/featrs/featrs)' \
+            https://crates.io/api/v1/crates/featrs \
+            | jq -r '.crate.max_stable_version // .crate.max_version')
+          current=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[0].version')
+
+          # A milestone release is pending if Cargo.toml is ahead of crates.io.
+          highest=$(printf '%s\n%s\n' "$latest" "$current" | sort -V | tail -n1)
+          if [ "$highest" = "$current" ] && [ "$current" != "$latest" ]; then
+            echo "Cargo.toml ($current) is ahead of crates.io ($latest); skipping nightly."
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          IFS=. read -r major minor patch <<< "$latest"
+          next="$major.$minor.$((patch + 1))"
+          tag="v$next"
+
+          {
+            echo "release=true"
+            echo "bump=true"
+            echo "version=$next"
+            echo "tag=$tag"
+          } >> "$GITHUB_OUTPUT"
+          echo "Nightly version: $next ($tag)"
+
+      - name: Tag nightly snapshot
+        if: steps.version.outputs.release == 'true' && steps.version.outputs.bump == 'true'
+        run: |
+          set -euo pipefail
+          tag="${{ steps.version.outputs.tag }}"
+          version="${{ steps.version.outputs.version }}"
+
+          cargo set-version "$version"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml
+          git commit -m "chore(release): $tag [nightly]"
+
+          if git rev-parse "refs/tags/$tag" >/dev/null 2>&1; then
+            git tag -d "$tag"
+          fi
+          git tag -a "$tag" -m "$tag [nightly]"
+
+          # Push only the tag. main stays at the milestone version; nightlies are
+          # snapshots published from a version-bump commit.
+          git push --force origin "refs/tags/$tag"
+
+  release:
+    name: Publish nightly
+    needs: prepare
+    if: needs.prepare.outputs.release == 'true'
+    uses: ./.github/workflows/release-crate.yml
+    with:
+      tag: ${{ needs.prepare.outputs.tag }}
+      version: ${{ needs.prepare.outputs.version }}
+      nightly: true
+    secrets:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

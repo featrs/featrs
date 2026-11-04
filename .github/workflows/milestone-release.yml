@@ -1,0 +1,374 @@
+name: Milestone release
+
+on:
+  milestone:
+    types: [closed]
+  workflow_dispatch:
+    inputs:
+      milestone_number:
+        description: Milestone number to release
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Prepare milestone
+    runs-on: ubuntu-latest
+    outputs:
+      release: ${{ steps.meta.outputs.release }}
+      bump: ${{ steps.meta.outputs.bump }}
+      sync: ${{ steps.meta.outputs.sync }}
+      version: ${{ steps.meta.outputs.version }}
+      tag: ${{ steps.meta.outputs.tag }}
+      branch: ${{ steps.meta.outputs.branch }}
+      title: ${{ steps.meta.outputs.title }}
+      url: ${{ steps.meta.outputs.url }}
+      description: ${{ steps.meta.outputs.description }}
+
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-edit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-edit
+
+      - name: Determine and validate milestone
+        id: meta
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          EVENT_TITLE: ${{ github.event.milestone.title }}
+          EVENT_URL: ${{ github.event.milestone.html_url }}
+          EVENT_DESCRIPTION: ${{ github.event.milestone.description }}
+          EVENT_NUMBER: ${{ github.event.milestone.number }}
+          INPUT_NUMBER: ${{ inputs.milestone_number }}
+        run: |
+          set -euo pipefail
+          git fetch --tags --force
+
+          if [ -n "${EVENT_TITLE:-}" ]; then
+            title="$EVENT_TITLE"
+            url="$EVENT_URL"
+            description="$EVENT_DESCRIPTION"
+            number="$EVENT_NUMBER"
+          else
+            number="$INPUT_NUMBER"
+            data=$(gh api "repos/$GITHUB_REPOSITORY/milestones/$number")
+            title=$(jq -r '.title' <<< "$data")
+            url=$(jq -r '.html_url' <<< "$data")
+            description=$(jq -r '.description // ""' <<< "$data")
+          fi
+
+          version=$(printf '%s\n' "$title" | sed -nE 's/^v?([0-9]+\.[0-9]+\.[0-9]+).*/\1/p')
+          if [ -z "$version" ]; then
+            echo "Milestone '$title' does not start with a semantic version." >&2
+            exit 1
+          fi
+          if ! printf '%s\n' "$version" | grep -Eq '^(0\.[0-9]+\.0|[0-9]+\.0\.0)$' || [ "$version" = "0.0.0" ]; then
+            echo "Milestone '$title' maps to $version, but milestone releases must be 0.x.0 or x.0.0. Nightly patch releases are automated." >&2
+            exit 1
+          fi
+
+          major=${version%%.*}
+          minor=$(printf '%s\n' "$version" | cut -d. -f2)
+          lts=false
+          if [ "$major" != "0" ] && [ "$minor" = "0" ]; then
+            lts=true
+          fi
+
+          tag="v$version"
+          branch="release/v$version"
+
+          latest=$(curl -fsSL \
+            -H 'User-Agent: featrs-release-workflow (https://github.com/featrs/featrs)' \
+            https://crates.io/api/v1/crates/featrs \
+            | jq -r '.crate.max_stable_version // .crate.max_version')
+          current=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[0].version')
+
+          if [ "$(printf '%s\n%s\n' "$latest" "$version" | sort -V | tail -n1)" != "$version" ]; then
+            echo "Milestone $version is older than the published version $latest; skipping."
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          published=false
+          if [ "$version" = "$latest" ]; then
+            published=true
+          fi
+
+          release_exists=false
+          if gh release view "$tag" >/dev/null 2>&1; then
+            release_exists=true
+          fi
+
+          changelog_exists=false
+          if grep -q "^## \[$version\]" CHANGELOG.md; then
+            changelog_exists=true
+          fi
+
+          if [ "$published" = true ] && [ "$release_exists" = true ] && [ "$changelog_exists" = true ]; then
+            echo "All artifacts for $version already exist; nothing to do."
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "$changelog_exists" = true ]; then
+            if [ "$current" != "$version" ]; then
+              echo "CHANGELOG.md has $version but Cargo.toml is $current; refusing to reconcile." >&2
+              exit 1
+            fi
+            bump=false
+            sync=false
+          else
+            if [ "$(printf '%s\n%s\n' "$current" "$version" | sort -V | tail -n1)" != "$version" ]; then
+              echo "Milestone $version is not newer than Cargo.toml $current." >&2
+              exit 1
+            fi
+            bump=true
+            sync=true
+          fi
+
+          if [ "$bump" = true ]; then
+            # The previous milestone's metadata must be on main, otherwise this
+            # release would duplicate its changelog entries.
+            last_milestone=""
+            while IFS= read -r t; do
+              [ -z "$t" ] && continue
+              subject=$(git tag -l --format='%(contents:subject)' "$t")
+              if ! printf '%s\n' "$subject" | grep -q '\[nightly\]'; then
+                last_milestone="$t"
+                break
+              fi
+            done < <(git tag --sort=-v:refname)
+
+            if [ -n "$last_milestone" ]; then
+              last_version=${last_milestone#v}
+              if ! grep -q "^## \[$last_version\]" CHANGELOG.md; then
+                echo "CHANGELOG.md on main is missing the $last_version section. Merge the release metadata PR for $last_milestone before releasing the next milestone." >&2
+                exit 1
+              fi
+            fi
+          fi
+
+          {
+            echo "release=true"
+            echo "bump=$bump"
+            echo "sync=$sync"
+            echo "version=$version"
+            echo "tag=$tag"
+            echo "branch=$branch"
+            echo "title=$title"
+            echo "url=$url"
+            echo "lts=$lts"
+            echo "description<<RELEASE_DESCRIPTION"
+            printf '%s\n' "$description"
+            echo "RELEASE_DESCRIPTION"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Tag existing release commit
+        if: steps.meta.outputs.release == 'true' && steps.meta.outputs.bump == 'false'
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git rev-parse "refs/tags/v$VERSION" >/dev/null 2>&1; then
+            echo "Tag v$VERSION already exists; reusing it."
+            exit 0
+          fi
+          git tag -a "v$VERSION" -m "v$VERSION"
+          git push origin "refs/tags/v$VERSION"
+
+      - name: Update version and changelog
+        if: steps.meta.outputs.release == 'true' && steps.meta.outputs.bump == 'true'
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          MILESTONE_TITLE: ${{ steps.meta.outputs.title }}
+          MILESTONE_URL: ${{ steps.meta.outputs.url }}
+          LTS: ${{ steps.meta.outputs.lts }}
+        run: |
+          set -euo pipefail
+          cargo set-version "$VERSION"
+
+          python3 - <<'PY'
+          import datetime
+          import os
+          import pathlib
+          import re
+
+          version = os.environ["VERSION"]
+          title = os.environ["MILESTONE_TITLE"]
+          url = os.environ["MILESTONE_URL"]
+          lts = os.environ.get("LTS") == "true"
+          repo = os.environ["GITHUB_REPOSITORY"]
+
+          path = pathlib.Path("CHANGELOG.md")
+          text = path.read_text()
+
+          if f"## [{version}]" in text:
+              raise SystemExit(f"CHANGELOG.md already contains a section for {version}")
+
+          date = datetime.date.today().isoformat()
+          header = f"## [Unreleased]\n\n## [{version}] - {date}\n\n**Milestone:** [{title}]({url})\n"
+          if lts:
+              header += "\n**LTS release.**\n"
+
+          needle = "## [Unreleased]\n"
+          if needle not in text:
+              raise SystemExit("CHANGELOG.md has no [Unreleased] heading")
+          text = text.replace(needle, header, 1)
+
+          after = text.split(header, 1)[1]
+          previous = re.search(r"^## \[(\d+\.\d+\.\d+)\]", after, re.MULTILINE)
+          if not previous:
+              raise SystemExit("Could not find the previous release heading")
+
+          old_link = re.search(r"^\[Unreleased\]: .*$", text, re.MULTILINE)
+          if not old_link:
+              raise SystemExit("Could not find the [Unreleased] link")
+
+          new_links = (
+              f"[Unreleased]: https://github.com/{repo}/compare/v{version}...HEAD\n"
+              f"[{version}]: https://github.com/{repo}/compare/v{previous.group(1)}...v{version}"
+          )
+          text = text.replace(old_link.group(0), new_links, 1)
+          path.write_text(text)
+          PY
+
+      - name: Commit, tag, and push
+        if: steps.meta.outputs.release == 'true' && steps.meta.outputs.bump == 'true'
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          BRANCH: ${{ steps.meta.outputs.branch }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml CHANGELOG.md
+          git commit -m "chore(release): v$VERSION"
+
+          if git rev-parse "refs/tags/v$VERSION" >/dev/null 2>&1; then
+            git tag -d "v$VERSION"
+          fi
+          git tag -a "v$VERSION" -m "v$VERSION"
+
+          git push --force origin "HEAD:refs/heads/$BRANCH"
+          git push --force origin "refs/tags/v$VERSION"
+
+  release:
+    name: Publish milestone
+    needs: prepare
+    if: needs.prepare.outputs.release == 'true'
+    uses: ./.github/workflows/release-crate.yml
+    with:
+      tag: ${{ needs.prepare.outputs.tag }}
+      version: ${{ needs.prepare.outputs.version }}
+      nightly: false
+    secrets:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  sync:
+    name: Sync release metadata
+    needs: [prepare, release]
+    if: needs.prepare.outputs.release == 'true' && needs.prepare.outputs.sync == 'true'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+      BRANCH: ${{ needs.prepare.outputs.branch }}
+      TITLE: ${{ needs.prepare.outputs.title }}
+      URL: ${{ needs.prepare.outputs.url }}
+
+    steps:
+      - name: Open release metadata PR
+        id: pr
+        run: |
+          set -euo pipefail
+          existing=$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            pr="$existing"
+          else
+            printf -v body '%s\n\n%s\n\n%s\n' \
+              "Automated release metadata for **$TITLE**." \
+              "The release was published from tag \`v$VERSION\`. This PR syncs \`Cargo.toml\` and \`CHANGELOG.md\` on \`main\`." \
+              "Milestone: $URL"
+            pr=$(gh pr create --base main --head "$BRANCH" \
+              --title "chore: sync v$VERSION release metadata" \
+              --body "$body" | grep -oE '[0-9]+$')
+          fi
+          echo "pr=$pr" >> "$GITHUB_OUTPUT"
+
+      - name: Dispatch CI on release branch
+        id: ci
+        run: |
+          set -euo pipefail
+          pr="${{ steps.pr.outputs.pr }}"
+
+          # `main` may have moved while the release was publishing. Bring the
+          # metadata branch up to date before running the required checks.
+          if ! update_output=$(gh pr update-branch "$pr" 2>&1); then
+            if printf '%s\n' "$update_output" | grep -qiE 'not behind|up.to.date|already'; then
+              echo "Release branch is already up to date."
+            else
+              echo "Failed to update release branch: $update_output" >&2
+              gh pr comment "$pr" --body "Could not update the release metadata branch: $update_output" || true
+              exit 1
+            fi
+          fi
+
+          head_sha=$(gh pr view "$pr" --json headRefOid --jq '.headRefOid')
+          gh workflow run ci.yml --ref "$BRANCH"
+          run_id=""
+          for _ in $(seq 1 12); do
+            run_id=$(gh run list --workflow ci.yml --branch "$BRANCH" \
+              --event workflow_dispatch --limit 20 \
+              --json databaseId,headSha \
+              --jq ".[] | select(.headSha == \"$head_sha\") | .databaseId" \
+              | head -n1)
+            [ -n "$run_id" ] && break
+            sleep 5
+          done
+          if [ -z "$run_id" ]; then
+            echo "CI run did not appear for $BRANCH at $head_sha" >&2
+            exit 1
+          fi
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+          gh run watch "$run_id" --exit-status
+
+      - name: Merge metadata PR
+        run: |
+          set -euo pipefail
+          pr="${{ steps.pr.outputs.pr }}"
+          if merge_output=$(gh pr merge "$pr" --squash --delete-branch 2>&1); then
+            echo "Merged release metadata PR #$pr"
+          else
+            echo "Automatic merge failed: $merge_output" >&2
+            gh pr comment "$pr" --body "CI passed, but the automatic merge failed: $merge_output" || true
+            exit 1
+          fi
