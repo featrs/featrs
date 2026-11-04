@@ -37,7 +37,7 @@ cargo test
 
 Releases follow the GitHub milestones:
 
-- **Nightly** (patch, `0.x.y`): the `Nightly release` workflow runs daily at
+- **Nightly** (patch, `x.y.z`): the `Nightly release` workflow runs daily at
   03:00 UTC. If `main` has code changes since the last tag, it bumps the patch
   version, tags it, publishes to crates.io, and creates a GitHub prerelease.
   Nightlies are regular crates.io versions but are marked as prereleases on
@@ -56,8 +56,9 @@ Releases follow the GitHub milestones:
 Milestone titles must start with a version: `v0.6.0`, `0.6.0`, `v1.0.0`, etc.
 Patch milestones (`0.6.1`) are rejected; patch releases are automated
 nightlies. To publish a nightly on demand, run the `Nightly release` workflow
-manually. To retry a failed milestone release, run the `Milestone release`
-workflow manually with the milestone number.
+manually; it still publishes only when `main` has code changes since the last
+tag. To retry a failed milestone release, run the `Milestone release` workflow
+manually with the milestone number.
 
 Do not bump `Cargo.toml`, edit a release section by hand, or push `v*` tags
 manually. The workflows use the `CARGO_REGISTRY_TOKEN` repository secret, a
