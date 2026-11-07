@@ -73,3 +73,33 @@ fn test_cyclical_encoder_integration() {
     assert!(result.width() >= 2);
     assert_eq!(result.height(), 5);
 }
+
+#[test]
+fn test_rolling_fit_rejects_non_float64_columns() {
+    // RollingAggregator::fit used to accept any dtype and fail only at
+    // transform, breaking pipelines that were reported as fitted (see #221).
+    let col = Column::from(Series::new("s".into(), &["a", "b", "c"]));
+    let df = DataFrame::new(3, vec![col]).unwrap();
+
+    let mut rolling = RollingAggregator::new(&["s"], 2, RollingFn::Mean);
+    let err = rolling.fit(df).unwrap_err();
+    assert!(
+        format!("{err}").contains("expected Float64"),
+        "expected a dtype error at fit, got {err}"
+    );
+}
+
+#[test]
+fn test_difference_fit_rejects_non_float64_columns() {
+    // Difference::fit had the same gap: existence checked, dtype not,
+    // so transform failed with InvalidInput for types visible at fit.
+    let col = Column::from(Series::new("c".into(), &[1_i64, 2, 3]));
+    let df = DataFrame::new(3, vec![col]).unwrap();
+
+    let mut d = Difference::diff(&["c"], 1);
+    let err = d.fit(df).unwrap_err();
+    assert!(
+        format!("{err}").contains("expected Float64"),
+        "expected a dtype error at fit, got {err}"
+    );
+}

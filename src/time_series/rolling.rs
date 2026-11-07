@@ -133,10 +133,14 @@ impl Fit<DataFrame> for RollingAggregator {
             )));
         }
         for col in &self.columns {
-            if x.column(col.as_str()).is_err() {
+            let c = x.column(col.as_str()).map_err(|_| {
+                Error::InvalidInput(format!("RollingAggregator: column '{}' not found.", col))
+            })?;
+            if c.dtype() != &DataType::Float64 {
                 return Err(Error::InvalidInput(format!(
-                    "RollingAggregator: column '{}' not found.",
-                    col
+                    "RollingAggregator: column '{}' has dtype {}; expected Float64.",
+                    col,
+                    c.dtype()
                 )));
             }
         }
