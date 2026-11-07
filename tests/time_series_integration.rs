@@ -73,3 +73,68 @@ fn test_cyclical_encoder_integration() {
     assert!(result.width() >= 2);
     assert_eq!(result.height(), 5);
 }
+
+#[test]
+fn test_rolling_all_nan_window_matches_mean_and_expanding() {
+    // An all-NaN window must yield NaN for Min and Max, not the former
+    // INFINITY/NEG_INFINITY fold seeds (see #251), matching Mean/Sum/Std
+    // and ExpandingAggregator on identical input.
+    let col = Column::from(Series::new(
+        "x".into(),
+        &[f64::NAN, f64::NAN, f64::NAN, f64::NAN],
+    ));
+    let df = DataFrame::new(4, vec![col]).unwrap();
+
+    for (fn_, name) in [
+        (RollingFn::Min, "x_min_2"),
+        (RollingFn::Max, "x_max_2"),
+        (RollingFn::Mean, "x_mean_2"),
+    ] {
+        let mut rolling = RollingAggregator::new(&["x"], 2, fn_);
+        rolling.fit(df.clone()).unwrap();
+        let out = rolling.transform(df.clone()).unwrap();
+        let v = out
+            .column(name)
+            .unwrap()
+            .f64()
+            .unwrap()
+            .get(2)
+            .unwrap_or_default();
+        assert!(
+            v.is_nan(),
+            "expected NaN for {name} on an all-NaN window, got {v}"
+        );
+    }
+}
+
+#[test]
+fn test_rolling_min_max_ignores_nan_in_mixed_windows() {
+    // A mixed window containing NaN keeps its previous semantics: NaN is
+    // ignored and the minimum/maximum of the remaining values is returned.
+    let col = Column::from(Series::new(
+        "x".into(),
+        &[1.0_f64, f64::NAN, 2.0, 3.0, f64::NAN, 5.0],
+    ));
+    let df = DataFrame::new(6, vec![col]).unwrap();
+
+    let mut rolling = RollingAggregator::new(&["x"], 2, RollingFn::Min);
+    rolling.fit(df.clone()).unwrap();
+    let out = rolling.transform(df).unwrap();
+
+    // Mixed windows: index 0 -> None (window not complete);
+    // index 1 window [1.0, NaN] -> 1.0 (NaN ignored); index 2 [NaN, 2.0] -> 2.0;
+    // index 3 [2.0, 3.0] -> 2.0; index 4 [3.0, NaN] -> 3.0; index 5 [NaN, 5.0] -> 5.0.
+    let vals: Vec<Option<f64>> = out
+        .column("x_min_2")
+        .unwrap()
+        .f64()
+        .unwrap()
+        .iter()
+        .collect();
+    assert_eq!(vals[0], None);
+    assert_eq!(vals[1], Some(1.0));
+    assert_eq!(vals[2], Some(2.0));
+    assert_eq!(vals[3], Some(2.0));
+    assert_eq!(vals[4], Some(3.0));
+    assert_eq!(vals[5], Some(5.0));
+}
