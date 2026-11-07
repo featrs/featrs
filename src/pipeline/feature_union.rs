@@ -147,6 +147,11 @@ impl Fit<DataFrame> for FeatureUnion {
                 "FeatureUnion.fit received a DataFrame with 0 rows.".into(),
             ));
         }
+        if x.width() == 0 {
+            return Err(Error::InvalidInput(
+                "FeatureUnion.fit received a DataFrame with 0 columns.".into(),
+            ));
+        }
 
         for (name, transformer) in self.transformers.iter_mut() {
             transformer
@@ -437,6 +442,22 @@ mod tests {
             matches!(err, Error::InvalidInput(_)),
             "expected InvalidInput, got {err:?}",
         );
+        match err {
+            Error::InvalidInput(msg) => assert!(msg.contains("0 rows"), "got {msg}"),
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_feature_union_fit_rejects_zero_column_frame() {
+        let mut union =
+            FeatureUnion::new(vec![("scale".into(), Box::new(StandardScaler::new()))]).unwrap();
+        let zero_col = DataFrame::new(3, vec![]).unwrap();
+        let err = union.fit(zero_col).unwrap_err();
+        match err {
+            Error::InvalidInput(msg) => assert!(msg.contains("0 columns"), "got {msg}"),
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
     }
 
     #[test]

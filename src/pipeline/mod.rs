@@ -105,8 +105,8 @@ impl Pipeline {
 }
 
 /// Shared empty-frame policy for the composition layer: `fit` and `transform`
-/// both reject a frame with 0 rows, in [`Pipeline`] and `ColumnTransformer`
-/// alike. Column-count emptiness is checked separately where it applies.
+/// both reject a frame with 0 rows, in [`Pipeline`], `ColumnTransformer`, and
+/// [`FeatureUnion`] alike. Column-count emptiness is checked separately where it applies.
 pub(crate) fn ensure_non_empty_rows(x: &DataFrame, who: &str) -> Result<()> {
     if x.height() == 0 {
         return Err(Error::InvalidInput(format!(
