@@ -39,7 +39,7 @@ jobs:
         run: cargo fmt --check
 
       - name: Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --all-targets --all-features -- -W clippy::cognitive_complexity -D warnings
 
   build-test:
     name: Build & Test (${{ matrix.os }})
