@@ -52,6 +52,7 @@ impl Fit<DataFrame> for Lagger {
     type Output = ();
 
     fn fit(&mut self, x: DataFrame) -> Result<()> {
+        self.fitted = false;
         if self.columns.is_empty() {
             return Err(Error::InvalidInput(
                 "Lagger: at least one column name is required.".into(),
@@ -163,5 +164,27 @@ mod tests {
             payload.contains("[1, 1]"),
             "error message should contain the full periods list '[1, 1]', got: {payload}"
         );
+    }
+
+    #[test]
+    fn test_failed_refit_resets_fitted_state() {
+        let good = DataFrame::new(
+            3,
+            vec![Column::from(Series::new("x".into(), &[1.0_f64, 2.0, 3.0]))],
+        )
+        .unwrap();
+        let bad = DataFrame::new(
+            3,
+            vec![Column::from(Series::new(
+                "missing".into(),
+                &[1.0_f64, 2.0, 3.0],
+            ))],
+        )
+        .unwrap();
+        let mut lagger = Lagger::new(&["x"], &[1]);
+
+        lagger.fit(good.clone()).unwrap();
+        assert!(lagger.fit(bad).is_err());
+        assert!(matches!(lagger.transform(good), Err(Error::NotFitted(_))));
     }
 }

@@ -149,6 +149,7 @@ impl Fit<DataFrame> for ExpandingAggregator {
     type Output = ();
 
     fn fit(&mut self, x: DataFrame) -> Result<()> {
+        self.fitted = false;
         if x.height() == 0 {
             return Err(Error::InvalidInput(
                 "ExpandingAggregator.fit received a DataFrame with 0 rows. \
@@ -396,6 +397,24 @@ mod tests {
         let mut e = ExpandingAggregator::new(&["nope"], ExpandingFn::Mean);
         let err = e.fit(df).unwrap_err();
         assert!(matches!(err, Error::InvalidInput(_)));
+    }
+
+    #[test]
+    fn test_failed_refit_resets_fitted_state() {
+        let good = make_df(&[1.0, 2.0, 3.0]);
+        let bad = DataFrame::new(
+            3,
+            vec![Column::from(Series::new(
+                "missing".into(),
+                &[1.0_f64, 2.0, 3.0],
+            ))],
+        )
+        .unwrap();
+        let mut e = ExpandingAggregator::new(&["x"], ExpandingFn::Mean);
+
+        e.fit(good.clone()).unwrap();
+        assert!(e.fit(bad).is_err());
+        assert!(matches!(e.transform(good), Err(Error::NotFitted(_))));
     }
 
     #[test]
