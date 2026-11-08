@@ -219,6 +219,10 @@ fn title_case(value: &str, separator: &str) -> String {
 fn validate_replacement(regex: &Regex, pattern: &str, replacement: &str) -> Result<()> {
     let bytes = replacement.as_bytes();
     let mut index = 0;
+    // Once a `${` has no closing brace, no later `${` can have one either.
+    // Remember the failed search so a replacement full of unclosed braces
+    // stays linear instead of rescanning the remaining template each time.
+    let mut unclosed_brace = false;
     while index < bytes.len() {
         if bytes[index] != b'$' {
             index += 1;
@@ -231,6 +235,10 @@ fn validate_replacement(regex: &Regex, pattern: &str, replacement: &str) -> Resu
 
         let reference_start = index + 1;
         let (reference, next) = if bytes.get(reference_start) == Some(&b'{') {
+            if unclosed_brace {
+                index += 1;
+                continue;
+            }
             match replacement[reference_start + 1..].find('}') {
                 Some(offset) => (
                     &replacement[reference_start + 1..reference_start + 1 + offset],
@@ -239,6 +247,7 @@ fn validate_replacement(regex: &Regex, pattern: &str, replacement: &str) -> Resu
                 // An unclosed brace is not a capture reference; the regex
                 // crate copies the dollar sign literally.
                 None => {
+                    unclosed_brace = true;
                     index += 1;
                     continue;
                 }
@@ -256,16 +265,15 @@ fn validate_replacement(regex: &Regex, pattern: &str, replacement: &str) -> Resu
         };
         index = next;
 
-        let resolves = if !reference.is_empty() && reference.bytes().all(|b| b.is_ascii_digit()) {
-            reference
-                .parse::<usize>()
-                .map(|number| number < regex.captures_len())
-                .unwrap_or(false)
-        } else {
-            regex
+        // The `regex` crate parses a reference as a group index first and
+        // falls back to a capture name, so numeric forms that its integer
+        // parser accepts (such as `${+1}`) are valid when the index exists.
+        let resolves = match reference.parse::<usize>() {
+            Ok(number) => number < regex.captures_len(),
+            Err(_) => regex
                 .capture_names()
                 .flatten()
-                .any(|name| name == reference)
+                .any(|name| name == reference),
         };
         if !resolves {
             return Err(Error::InvalidInput(format!(
@@ -677,6 +685,74 @@ mod tests {
             values(&cleaner.transform(df).unwrap()),
             vec![Some("<Hello>".into()), Some("<world>".into())]
         );
+    }
+
+    #[test]
+    fn test_unbraced_whole_match_reference_is_expanded() {
+        let df = frame(&[Some("abc")]);
+        let mut cleaner = StringCleaner::new()
+            .columns(&["text"])
+            .replace("(abc)", "[$0]");
+        cleaner.fit(df.clone()).unwrap();
+
+        assert_eq!(
+            values(&cleaner.transform(df).unwrap()),
+            vec![Some("[abc]".into())]
+        );
+    }
+
+    #[test]
+    fn test_unbraced_numeric_capture_reference_is_expanded() {
+        let df = frame(&[Some("abc")]);
+        let mut cleaner = StringCleaner::new()
+            .columns(&["text"])
+            .replace("(abc)", "[$1]");
+        cleaner.fit(df.clone()).unwrap();
+
+        assert_eq!(
+            values(&cleaner.transform(df).unwrap()),
+            vec![Some("[abc]".into())]
+        );
+    }
+
+    #[test]
+    fn test_braced_signed_numeric_capture_reference_is_expanded() {
+        let df = frame(&[Some("abc")]);
+        let mut cleaner = StringCleaner::new()
+            .columns(&["text"])
+            .replace("(abc)", "[${+1}]");
+        cleaner.fit(df.clone()).unwrap();
+
+        assert_eq!(
+            values(&cleaner.transform(df).unwrap()),
+            vec![Some("[abc]".into())]
+        );
+    }
+
+    #[test]
+    fn test_unclosed_brace_replacement_is_literal() {
+        let df = frame(&[Some("abc")]);
+        let mut cleaner = StringCleaner::new()
+            .columns(&["text"])
+            .replace("abc", "${x${y");
+        cleaner.fit(df.clone()).unwrap();
+
+        assert_eq!(
+            values(&cleaner.transform(df).unwrap()),
+            vec![Some("${x${y".into())]
+        );
+    }
+
+    #[test]
+    fn test_unclosed_brace_does_not_hide_later_unbraced_reference() {
+        let df = frame(&[Some("abc")]);
+        let mut cleaner = StringCleaner::new()
+            .columns(&["text"])
+            .replace("[a-z]", "${oops $1");
+        let error = cleaner.fit(df).unwrap_err();
+
+        assert!(matches!(error, Error::InvalidInput(_)));
+        assert!(error.to_string().contains("references capture '1'"));
     }
 
     #[test]
