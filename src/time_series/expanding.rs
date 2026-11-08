@@ -148,6 +148,7 @@ impl Default for ExpandingAggregator {
 impl Fit<DataFrame> for ExpandingAggregator {
     type Output = ();
 
+    /// Validate the input and mark the aggregator fitted. A failed fit leaves it unfitted.
     fn fit(&mut self, x: DataFrame) -> Result<()> {
         self.fitted = false;
         if x.height() == 0 {
@@ -414,6 +415,17 @@ mod tests {
 
         e.fit(good.clone()).unwrap();
         assert!(e.fit(bad).is_err());
+        assert!(matches!(e.transform(good), Err(Error::NotFitted(_))));
+    }
+
+    #[test]
+    fn test_empty_refit_resets_fitted_state() {
+        let good = make_df(&[1.0, 2.0, 3.0]);
+        let empty = make_df(&[]);
+        let mut e = ExpandingAggregator::new(&["x"], ExpandingFn::Mean);
+
+        e.fit(good.clone()).unwrap();
+        assert!(matches!(e.fit(empty), Err(Error::InvalidInput(_))));
         assert!(matches!(e.transform(good), Err(Error::NotFitted(_))));
     }
 

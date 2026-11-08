@@ -56,6 +56,7 @@ impl Difference {
 impl Fit<DataFrame> for Difference {
     type Output = ();
 
+    /// Validate the input and mark the transformer fitted. A failed fit leaves it unfitted.
     fn fit(&mut self, x: DataFrame) -> Result<()> {
         self.fitted = false;
         if self.columns.is_empty() {
