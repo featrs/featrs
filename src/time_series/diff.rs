@@ -56,7 +56,9 @@ impl Difference {
 impl Fit<DataFrame> for Difference {
     type Output = ();
 
+    /// Validate the input and mark the transformer fitted. A failed fit leaves it unfitted.
     fn fit(&mut self, x: DataFrame) -> Result<()> {
+        self.fitted = false;
         if self.columns.is_empty() {
             return Err(Error::InvalidInput(
                 "Difference: at least one column is required.".into(),
@@ -168,5 +170,27 @@ mod tests {
         let pct = result.column("x_pct_1").unwrap().f64().unwrap();
         assert!(pct.get(0).is_none());
         assert_relative_eq!(pct.get(1).unwrap(), 0.1, epsilon = 1e-6);
+    }
+
+    #[test]
+    fn test_failed_refit_resets_fitted_state() {
+        let good = DataFrame::new(
+            3,
+            vec![Column::from(Series::new("x".into(), &[1.0_f64, 2.0, 3.0]))],
+        )
+        .unwrap();
+        let bad = DataFrame::new(
+            3,
+            vec![Column::from(Series::new(
+                "missing".into(),
+                &[1.0_f64, 2.0, 3.0],
+            ))],
+        )
+        .unwrap();
+        let mut d = Difference::diff(&["x"], 1);
+
+        d.fit(good.clone()).unwrap();
+        assert!(d.fit(bad).is_err());
+        assert!(matches!(d.transform(good), Err(Error::NotFitted(_))));
     }
 }
