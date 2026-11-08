@@ -463,6 +463,17 @@ mod tests {
     }
 
     #[test]
+    fn test_zero_min_periods_refit_resets_fitted_state() {
+        let good = make_df(&[1.0, 2.0]);
+        let mut e = ExpandingAggregator::new(&["x"], ExpandingFn::Mean);
+        e.fit(good.clone()).unwrap();
+
+        let mut e = e.min_periods(0);
+        assert!(matches!(e.fit(good.clone()), Err(Error::InvalidInput(_))));
+        assert!(matches!(e.transform(good), Err(Error::NotFitted(_))));
+    }
+
+    #[test]
     fn test_fit_non_f64_column_errors() {
         let col = Column::from(Series::new("x".into(), &["a", "b"]));
         let df = DataFrame::new(2, vec![col]).unwrap();
