@@ -34,7 +34,9 @@ pub enum CaseStyle {
 pub struct StringReplacement {
     /// Rust `regex` pattern to match.
     pub pattern: String,
-    /// Replacement text; capture references such as `$1` are supported.
+    /// Replacement text; capture references such as `$1` are supported and
+    /// must resolve against [`pattern`](Self::pattern), as checked at
+    /// [`fit`](Fit::fit).
     pub replacement: String,
 }
 
@@ -48,7 +50,8 @@ struct CompiledReplacement {
 ///
 /// Operations run in this order: trim, collapse internal whitespace, case
 /// normalization, then configured regex replacements in declaration order.
-/// Regexes are validated and compiled once during [`fit`](Fit::fit).
+/// Regexes are compiled and replacement templates are validated once during
+/// [`fit`](Fit::fit).
 ///
 /// # Example
 ///
@@ -137,7 +140,10 @@ impl StringCleaner {
     /// Append a regex replacement.
     ///
     /// Replacements run in declaration order after whitespace and case
-    /// operations. The pattern is validated when the cleaner is fitted.
+    /// operations. The pattern and the replacement template are validated
+    /// when the cleaner is fitted: a template that references a capture
+    /// group the pattern does not define (for example `$1` on a pattern
+    /// without capture groups) is rejected with [`Error::InvalidInput`].
     pub fn replace(mut self, pattern: &str, replacement: &str) -> Self {
         self.invalidate_fit();
         self.replacements.push(StringReplacement {
@@ -209,6 +215,125 @@ fn title_case(value: &str, separator: &str) -> String {
         .join(separator)
 }
 
+/// A capture-group reference parsed out of a replacement template.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum TemplateRef {
+    /// A numeric reference such as `$1` or `${2}`.
+    Number(usize),
+    /// A named reference such as `$word` or `${word}`.
+    Named(String),
+}
+
+/// Returns true for the ASCII characters allowed in an unbraced capture
+/// reference (`$ref`), mirroring the `regex` crate's expansion syntax.
+fn is_valid_cap_letter(byte: u8) -> bool {
+    matches!(byte, b'0'..=b'9' | b'a'..=b'z' | b'A'..=b'Z' | b'_')
+}
+
+/// Parse the capture reference at the start of `text`, which must begin with
+/// `$`. Returns the reference and the byte offset just past it, or `None`
+/// when `text` starts with no reference — a lone `$`, a `$` followed by a
+/// non-reference character, or an unclosed `${...`. The `regex` crate
+/// expands those literally instead of as references.
+fn parse_cap_ref(text: &[u8]) -> Option<(TemplateRef, usize)> {
+    if text.len() <= 1 || text[0] != b'$' {
+        return None;
+    }
+    if text[1] == b'{' {
+        let start = 2;
+        let mut end = start;
+        while end < text.len() && text[end] != b'}' {
+            end += 1;
+        }
+        if end == text.len() {
+            return None;
+        }
+        let reference = std::str::from_utf8(&text[start..end]).ok()?;
+        return Some((template_ref(reference), end + 1));
+    }
+    let start = 1;
+    let mut end = start;
+    while end < text.len() && is_valid_cap_letter(text[end]) {
+        end += 1;
+    }
+    if end == start {
+        return None;
+    }
+    // The scan above only accepts ASCII, so the slice is valid UTF-8.
+    let reference = std::str::from_utf8(&text[start..end]).ok()?;
+    Some((template_ref(reference), end))
+}
+
+/// Classify a reference body: all digits mean a group index, anything else
+/// is a group name.
+fn template_ref(reference: &str) -> TemplateRef {
+    match reference.parse::<usize>() {
+        Ok(index) => TemplateRef::Number(index),
+        Err(_) => TemplateRef::Named(reference.to_owned()),
+    }
+}
+
+/// Collect every capture-group reference in `template`, following the
+/// expansion syntax of the `regex` crate: `$1`, `${1}`, `$name` and
+/// `${name}`, with `$$` as an escape for a literal dollar sign.
+fn capture_refs(template: &str) -> Vec<TemplateRef> {
+    let mut refs = Vec::new();
+    let mut rest = template;
+    while let Some(offset) = rest.find('$') {
+        rest = &rest[offset..];
+        if rest.as_bytes().get(1) == Some(&b'$') {
+            rest = &rest[2..];
+            continue;
+        }
+        match parse_cap_ref(rest.as_bytes()) {
+            Some((reference, end)) => {
+                refs.push(reference);
+                rest = &rest[end..];
+            }
+            None => rest = &rest[1..],
+        }
+    }
+    refs
+}
+
+/// Check every capture-group reference in `template` against the pattern it
+/// will run on, returning a description of the first unresolvable one.
+///
+/// The `regex` crate expands a reference to a group that does not exist into
+/// an empty string, so a template like `$1` on a pattern without capture
+/// groups would silently blank every matched cell during `transform`.
+fn validate_replacement_template(regex: &Regex, template: &str) -> Option<String> {
+    let captures_len = regex.captures_len();
+    let named: Vec<&str> = regex.capture_names().flatten().collect();
+    for reference in capture_refs(template) {
+        match reference {
+            TemplateRef::Number(index) => {
+                if index >= captures_len {
+                    let group_count = captures_len - 1;
+                    let noun = if group_count == 1 {
+                        "capture group"
+                    } else {
+                        "capture groups"
+                    };
+                    return Some(format!(
+                        "it references capture group {index}, but the pattern defines \
+                         {group_count} {noun}"
+                    ));
+                }
+            }
+            TemplateRef::Named(name) => {
+                if !named.contains(&name.as_str()) {
+                    return Some(format!(
+                        "it references the capture group named '{name}', which the pattern \
+                         does not define"
+                    ));
+                }
+            }
+        }
+    }
+    None
+}
+
 impl Fit<DataFrame> for StringCleaner {
     type Output = ();
 
@@ -261,6 +386,14 @@ impl Fit<DataFrame> for StringCleaner {
                     replacement.pattern, error
                 ))
             })?;
+            if let Some(detail) = validate_replacement_template(&regex, &replacement.replacement) {
+                return Err(Error::InvalidInput(format!(
+                    "StringCleaner.fit: invalid replacement template '{}' for pattern '{}': {}. \
+                     Remove this replacement or fix the template to reference an existing \
+                     capture group ($0 always refers to the whole match).",
+                    replacement.replacement, replacement.pattern, detail
+                )));
+            }
             compiled.push(CompiledReplacement {
                 regex,
                 replacement: replacement.replacement.clone(),
@@ -553,6 +686,112 @@ mod tests {
 
         assert!(matches!(error, Error::InvalidInput(_)));
         assert!(error.to_string().contains("Remove this pattern"));
+    }
+
+    #[test]
+    fn test_invalid_replacement_template_errors_at_fit_with_actionable_message() {
+        let df = frame(&[Some("abc123")]);
+        let mut cleaner = StringCleaner::new()
+            .columns(&["text"])
+            .replace("[a-z]", "$1");
+        let error = cleaner.fit(df.clone()).unwrap_err();
+
+        assert!(matches!(error, Error::InvalidInput(_)));
+        let message = error.to_string();
+        assert!(
+            message.contains("$1"),
+            "message names the template: {message}"
+        );
+        assert!(
+            message.contains("[a-z]"),
+            "message names the pattern: {message}"
+        );
+        assert!(
+            message.contains("Remove this replacement"),
+            "message gives actionable advice: {message}"
+        );
+        // The failed fit must leave the cleaner unfitted rather than silently
+        // blanking matched cells during transform.
+        assert!(matches!(cleaner.transform(df), Err(Error::NotFitted(_))));
+    }
+
+    #[test]
+    fn test_valid_replacement_templates_fit_and_expand() {
+        let df = frame(&[Some("ab-12")]);
+
+        // Numbered references ($1, $2) against a pattern that defines them.
+        let mut numbered = StringCleaner::new()
+            .columns(&["text"])
+            .replace(r"([a-z]+)-([0-9]+)", "$2:$1");
+        numbered.fit(df.clone()).unwrap();
+        assert_eq!(
+            values(&numbered.transform(df.clone()).unwrap()),
+            vec![Some("12:ab".into())]
+        );
+
+        // Braced numbered reference (${1}).
+        let mut braced = StringCleaner::new()
+            .columns(&["text"])
+            .replace(r"([a-z]+)", "<${1}>");
+        braced.fit(df.clone()).unwrap();
+        assert_eq!(
+            values(&braced.transform(df.clone()).unwrap()),
+            vec![Some("<ab>-12".into())]
+        );
+
+        // `$$` escapes a literal dollar sign, so `$$1` is the text "$1" and
+        // not a group reference: it must fit even with no capture groups.
+        let mut escaped = StringCleaner::new()
+            .columns(&["text"])
+            .replace("[0-9]+", "$$1");
+        escaped.fit(df.clone()).unwrap();
+        assert_eq!(
+            values(&escaped.transform(df).unwrap()),
+            vec![Some("ab-$1".into())]
+        );
+    }
+
+    #[test]
+    fn test_named_capture_reference_validated_at_fit() {
+        let df = frame(&[Some("ab-12")]);
+
+        let mut valid = StringCleaner::new()
+            .columns(&["text"])
+            .replace(r"(?<word>[a-z]+)", "[${word}]");
+        valid.fit(df.clone()).unwrap();
+        assert_eq!(
+            values(&valid.transform(df.clone()).unwrap()),
+            vec![Some("[ab]-12".into())]
+        );
+
+        let mut missing = StringCleaner::new()
+            .columns(&["text"])
+            .replace(r"[a-z]+", "${missing}");
+        let error = missing.fit(df).unwrap_err();
+        assert!(matches!(error, Error::InvalidInput(_)));
+        assert!(
+            error.to_string().contains("${missing}"),
+            "message names the template: {error}"
+        );
+    }
+
+    #[test]
+    fn test_transform_output_unchanged_for_valid_templates() {
+        let df = frame(&[Some("abc123"), Some("2026-08"), Some("none")]);
+        let mut cleaner = StringCleaner::new()
+            .columns(&["text"])
+            .replace(r"([a-z]+)([0-9]+)", "${2}-${1}")
+            .replace(r"[0-9]+", "[$0]");
+        cleaner.fit(df.clone()).unwrap();
+
+        assert_eq!(
+            values(&cleaner.transform(df).unwrap()),
+            vec![
+                Some("[123]-abc".into()),
+                Some("[2026]-[08]".into()),
+                Some("none".into())
+            ]
+        );
     }
 
     #[test]
