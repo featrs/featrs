@@ -25,12 +25,13 @@ const DEFAULT_HIGH_NULL_THRESHOLD: f64 = 0.5;
 /// Default `|skewness|` above which a column is imputed with its median.
 const DEFAULT_SKEW_THRESHOLD: f64 = 1.0;
 
-/// Value used to fill an all-null column under [`NullColumnBehavior::Fill`].
+/// Value used to fill an all-missing column under [`NullColumnBehavior::Fill`].
 const NULL_FILL_VALUE: f64 = 0.0;
 
-/// What to do with a `Float64` column that is entirely null.
+/// What to do with a `Float64` column whose values are entirely missing
+/// (all `null`, all `NaN`, or a mix of both).
 ///
-/// An all-null column has no value any statistic-based strategy could use:
+/// An all-missing column has no value any statistic-based strategy could use:
 /// `Mean`, `Median` and `MostFrequent` all reject it. The behavior is therefore
 /// configurable rather than derived from the data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -92,7 +93,8 @@ impl PartialEq for ImputationStrategy {
 /// # Decision order
 ///
 /// 1. A column with no missing value needs nothing and is left out of the plan.
-/// 2. An **entirely null** column has no value to compute a statistic from, so
+/// 2. An **entirely missing** column (all `null`, all `NaN`, or a mix) has no
+///    value to compute a statistic from, so
 ///    it follows [`NullColumnBehavior`]: dropped (default), an error, or filled
 ///    with the constant `0.0`. A forced [`Strategy::Constant`] applies instead,
 ///    because it needs no statistic.
@@ -270,17 +272,25 @@ impl Fit<DataFrame> for AutoImputer {
                 ))
             })?;
 
-            // One pass: the non-null values feed the skew test, the null count
-            // feeds the null-fraction test.
+            // One pass: the non-missing values feed the skew test. `nulls`
+            // counts only `None`, because `high_null_threshold` is documented
+            // as a null fraction. `missing` counts both `None` and `NaN`, so a
+            // NaN never reaches the statistic and an all-missing column still
+            // follows `NullColumnBehavior`.
             let mut vals: Vec<f64> = Vec::with_capacity(ca.len());
             let mut nulls = 0usize;
+            let mut missing = 0usize;
             for v in ca.iter() {
                 match v {
-                    Some(v) => vals.push(v),
-                    None => nulls += 1,
+                    Some(v) if !v.is_nan() => vals.push(v),
+                    Some(_) => missing += 1,
+                    None => {
+                        nulls += 1;
+                        missing += 1;
+                    }
                 }
             }
-            if nulls == 0 {
+            if missing == 0 {
                 continue;
             }
 
@@ -299,7 +309,7 @@ impl Fit<DataFrame> for AutoImputer {
                     }
                     NullColumnBehavior::Error => {
                         return Err(Error::InvalidInput(format!(
-                            "AutoImputer.fit: column '{name}' is entirely null, so no \
+                            "AutoImputer.fit: column '{name}' is entirely null or NaN, so no \
                              imputation statistic can be computed from it. Drop the column \
                              or set NullColumnBehavior::Fill."
                         )));
@@ -604,6 +614,102 @@ mod tests {
         let err = imp.fit(df).unwrap_err();
         assert!(matches!(err, Error::InvalidInput(_)), "got {err}");
         assert!(err.to_string().contains("entirely null"));
+    }
+
+    #[test]
+    fn test_nan_counts_as_missing_in_plan_scan() {
+        // The plan scan must count NaN as missing so it never enters the
+        // skew/mean statistics (see #194). With NaN as a minority the Mean
+        // comes from the non-NaN values only (old behavior: mean = NaN).
+        let df = frame(
+            vec![f64_col(
+                "a",
+                &[Some(1.0), Some(f64::NAN), Some(3.0), Some(4.0)],
+            )],
+            4,
+        );
+        let mut imp = AutoImputer::new();
+        imp.fit(df.clone()).unwrap();
+        assert_eq!(imp.chosen_name(), Some("Mean"));
+        let out = imp.transform(df).unwrap();
+        let got = vals(&out, "a");
+        assert!(
+            got.iter().all(|v| v.is_some_and(|x| x.is_finite())),
+            "expected no missing cells left, got {got:?}"
+        );
+        assert_relative_eq!(got[0].unwrap(), 1.0);
+        assert_relative_eq!(got[1].unwrap(), 8.0 / 3.0, epsilon = 1e-9);
+        assert_relative_eq!(got[2].unwrap(), 3.0);
+        assert_relative_eq!(got[3].unwrap(), 4.0);
+
+        // The threshold is a null fraction. The issue's example has one null
+        // and one NaN, so it is below the 0.5 threshold and the delegate fills
+        // both cells with the mean of the non-NaN values, 2.0.
+        let df = frame(
+            vec![f64_col("b", &[Some(1.0), Some(f64::NAN), Some(3.0), None])],
+            4,
+        );
+        let mut imp = AutoImputer::new();
+        imp.fit(df.clone()).unwrap();
+        assert_eq!(imp.chosen_name(), Some("Mean"));
+        assert_eq!(
+            vals(&imp.transform(df).unwrap(), "b"),
+            vec![Some(1.0), Some(2.0), Some(3.0), Some(2.0)]
+        );
+
+        // Two nulls out of four rows is exactly the threshold, so the column
+        // is skipped even though no NaN is involved.
+        let df = frame(vec![f64_col("c", &[Some(1.0), None, Some(3.0), None])], 4);
+        let mut imp = AutoImputer::new();
+        imp.fit(df.clone()).unwrap();
+        assert_eq!(imp.chosen_name(), Some("Skipped"));
+    }
+
+    #[test]
+    fn test_mixed_nan_and_null_column_follows_null_column_behavior() {
+        let mk = || {
+            frame(
+                vec![f64_col("z", &[Some(f64::NAN), None, Some(f64::NAN)])],
+                3,
+            )
+        };
+
+        let mut imp = AutoImputer::new().null_column_behavior(NullColumnBehavior::Error);
+        let err = imp.fit(mk()).unwrap_err();
+        assert!(matches!(err, Error::InvalidInput(_)), "got {err}");
+
+        let mut imp = AutoImputer::new().null_column_behavior(NullColumnBehavior::Fill);
+        imp.fit(mk()).unwrap();
+        let out = imp.transform(mk()).unwrap();
+        assert_eq!(vals(&out, "z"), vec![Some(NULL_FILL_VALUE); 3]);
+    }
+
+    #[test]
+    fn test_all_nan_column_follows_null_column_behavior() {
+        // An all-NaN column previously fit successfully and emitted NaN
+        // everywhere; it must now follow NullColumnBehavior like an
+        // all-null column.
+        let mk = || frame(vec![f64_col("z", &[Some(f64::NAN), Some(f64::NAN)])], 2);
+
+        let mut imp = AutoImputer::new().null_column_behavior(NullColumnBehavior::Error);
+        let err = imp.fit(mk()).unwrap_err();
+        assert!(matches!(err, Error::InvalidInput(_)), "got {err}");
+        assert!(
+            err.to_string().contains("entirely null or NaN"),
+            "got {err}"
+        );
+
+        let mut imp = AutoImputer::new();
+        imp.fit(mk()).unwrap();
+        assert_eq!(imp.chosen_name(), Some("Dropped"));
+
+        let mut imp = AutoImputer::new().null_column_behavior(NullColumnBehavior::Fill);
+        imp.fit(mk()).unwrap();
+        let out = imp.transform(mk()).unwrap();
+        let got = vals(&out, "z");
+        for v in &got {
+            assert_relative_eq!(v.unwrap(), NULL_FILL_VALUE);
+        }
     }
 
     #[test]
