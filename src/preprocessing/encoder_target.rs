@@ -5,6 +5,8 @@
 //! `TargetEncoder` design. It is the only encoder in this crate that
 //! implements [`FitSupervised`] (it needs the target `y` at fit time).
 
+use crate::traits::FeatureNamesOut;
+use crate::traits::output_names::{ensure_required_present, identity_names};
 use crate::traits::{Error, FitSupervised, Result, Transform};
 use polars::prelude::*;
 use std::collections::HashMap;
@@ -325,6 +327,17 @@ impl Transform<DataFrame> for TargetEncoder {
         }
 
         Ok(out)
+    }
+}
+
+impl FeatureNamesOut for TargetEncoder {
+    /// Output names are the input names: `transform` rewrites columns in place.
+    fn feature_names_out(&self, input_columns: &[String]) -> Result<Vec<String>> {
+        let names = identity_names(self.fitted, "TargetEncoder", input_columns)?;
+        if let Some(column_names) = &self.column_names {
+            ensure_required_present(input_columns, column_names, "TargetEncoder")?;
+        }
+        Ok(names)
     }
 }
 

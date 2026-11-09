@@ -22,6 +22,8 @@ use super::power_transformer::PowerTransformer;
 use super::scaler::{MinMaxScaler, RobustScaler, StandardScaler, percentile_sorted};
 use crate::pipeline::DataFrameTransformer;
 use crate::pipeline::column_transformer::{ColumnTransformer, Remainder};
+use crate::traits::FeatureNamesOut;
+use crate::traits::output_names::ensure_fitted;
 use crate::traits::{Error, Fit, Result, Transform};
 use crate::util::require_f64_columns;
 
@@ -437,6 +439,21 @@ fn fit_plan(plan: &[(String, ScalingStrategy)], x: &DataFrame) -> Result<ColumnT
     let mut composite = ColumnTransformer::new(entries, Remainder::Passthrough);
     composite.fit(x.clone())?;
     Ok(composite)
+}
+
+impl FeatureNamesOut for AutoScaler {
+    /// Delegate to the fitted composite, which preserves every input name.
+    fn feature_names_out(&self, input_columns: &[String]) -> Result<Vec<String>> {
+        ensure_fitted(self.fitted, "AutoScaler")?;
+        let chosen = self.chosen.as_ref().ok_or_else(|| {
+            Error::NotFitted(
+                "AutoScaler has not been fitted. \
+                 Call .fit(dataframe) before .feature_names_out()."
+                    .into(),
+            )
+        })?;
+        chosen.feature_names_out(input_columns)
+    }
 }
 
 #[cfg(test)]

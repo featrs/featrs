@@ -8,6 +8,8 @@
 //! less than terms specific to a few.
 
 use crate::preprocessing::text::count_vectorizer::{CountVectorizer, Tokenizer};
+use crate::traits::FeatureNamesOut;
+use crate::traits::output_names::ensure_fitted;
 use crate::traits::{Error, Fit, Result, Transform};
 use polars::prelude::*;
 
@@ -526,6 +528,21 @@ impl Transform<DataFrame> for TFIDFVectorizer {
             .collect();
 
         DataFrame::new(n_rows, out_cols).map_err(|e| Error::Computation(e.to_string()))
+    }
+}
+
+impl FeatureNamesOut for TFIDFVectorizer {
+    /// The inner count vectorizer's terms, in vocabulary order.
+    fn feature_names_out(&self, input_columns: &[String]) -> Result<Vec<String>> {
+        ensure_fitted(self.fitted, "TFIDFVectorizer")?;
+        let vectorizer = self.count_vectorizer.as_ref().ok_or_else(|| {
+            Error::NotFitted(
+                "TFIDFVectorizer has not been fitted. \
+                 Call .fit(dataframe) before .feature_names_out()."
+                    .into(),
+            )
+        })?;
+        vectorizer.feature_names_out(input_columns)
     }
 }
 

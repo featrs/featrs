@@ -8,6 +8,10 @@
 //! - [`CountEncoder`] — replace categories with their raw occurrence counts
 //! - [`FrequencyEncoder`] — replace categories with their observed relative frequencies
 
+use crate::traits::FeatureNamesOut;
+use crate::traits::output_names::{
+    ensure_fitted, ensure_required_present, ensure_unique_names, subset_names,
+};
 use crate::traits::schema::{ColumnRequirement, RequiresSchema, SchemaSpec};
 use crate::traits::{Error, Fit, Result, Transform};
 use polars::prelude::*;
@@ -1253,6 +1257,129 @@ impl RequiresSchema for OneHotEncoder {
                 ],
             },
         }
+    }
+}
+
+impl FeatureNamesOut for OneHotEncoder {
+    /// The learned dummy columns, in fit column order and sorted category order.
+    fn feature_names_out(&self, input_columns: &[String]) -> Result<Vec<String>> {
+        ensure_fitted(self.fitted, "OneHotEncoder")?;
+        let cats = self.categories.as_ref().ok_or_else(|| {
+            Error::NotFitted(
+                "OneHotEncoder has not been fitted. \
+                 Call .fit(dataframe) before .feature_names_out()."
+                    .into(),
+            )
+        })?;
+        let start = usize::from(self.drop_first);
+        // Columns whose categories are all dropped emit nothing and are not
+        // required in the transform input; every other fitted column is.
+        let required: Vec<String> = cats
+            .iter()
+            .filter(|cat| cat.categories.len() > start)
+            .map(|cat| cat.column.clone())
+            .collect();
+        ensure_required_present(input_columns, &required, "OneHotEncoder")?;
+        Ok(planned_pairs(cats, self.drop_first)
+            .into_iter()
+            .map(|(column, category)| format!("{column}_{category}"))
+            .collect())
+    }
+}
+
+impl FeatureNamesOut for LabelEncoder {
+    /// `transform` renames the input's single column to its own name.
+    fn feature_names_out(&self, input_columns: &[String]) -> Result<Vec<String>> {
+        ensure_fitted(self.fitted, "LabelEncoder")?;
+        let first = input_columns.first().ok_or_else(|| {
+            Error::InvalidInput(
+                "LabelEncoder.feature_names_out: the input must contain at least one \
+                 column."
+                    .into(),
+            )
+        })?;
+        Ok(vec![first.clone()])
+    }
+}
+
+impl FeatureNamesOut for OrdinalEncoder {
+    /// The learned string columns, in fit order, under their original names.
+    fn feature_names_out(&self, input_columns: &[String]) -> Result<Vec<String>> {
+        ensure_fitted(self.fitted, "OrdinalEncoder")?;
+        let categories = self.categories.as_ref().ok_or_else(|| {
+            Error::NotFitted(
+                "OrdinalEncoder has not been fitted. \
+                 Call .fit(dataframe) before .feature_names_out()."
+                    .into(),
+            )
+        })?;
+        let required: Vec<String> = categories.iter().map(|(name, _)| name.clone()).collect();
+        ensure_required_present(input_columns, &required, "OrdinalEncoder")?;
+        Ok(required)
+    }
+}
+
+impl FeatureNamesOut for CountEncoder {
+    /// The learned string columns, in fit order, under their original names.
+    fn feature_names_out(&self, input_columns: &[String]) -> Result<Vec<String>> {
+        ensure_fitted(self.fitted, "CountEncoder")?;
+        let counts = self.counts.as_ref().ok_or_else(|| {
+            Error::NotFitted(
+                "CountEncoder has not been fitted. \
+                 Call .fit(dataframe) before .feature_names_out()."
+                    .into(),
+            )
+        })?;
+        let required: Vec<String> = counts.iter().map(|(name, _)| name.clone()).collect();
+        ensure_required_present(input_columns, &required, "CountEncoder")?;
+        Ok(required)
+    }
+}
+
+impl FeatureNamesOut for FrequencyEncoder {
+    /// The learned string columns, in fit order, under their original names.
+    fn feature_names_out(&self, input_columns: &[String]) -> Result<Vec<String>> {
+        subset_names(
+            self.fitted,
+            "FrequencyEncoder",
+            self.column_names.as_deref(),
+            input_columns,
+        )
+    }
+}
+
+impl FeatureNamesOut for BinaryEncoder {
+    /// Each fitted string column is replaced in place by its `_bit_{j}` columns.
+    fn feature_names_out(&self, input_columns: &[String]) -> Result<Vec<String>> {
+        ensure_fitted(self.fitted, "BinaryEncoder")?;
+        let names = self.column_names.as_ref().ok_or_else(|| {
+            Error::NotFitted(
+                "BinaryEncoder has not been fitted. \
+                 Call .fit(dataframe) before .feature_names_out()."
+                    .into(),
+            )
+        })?;
+        let bits = self.n_bits.as_ref().ok_or_else(|| {
+            Error::NotFitted(
+                "BinaryEncoder has not been fitted. \
+                 Call .fit(dataframe) before .feature_names_out()."
+                    .into(),
+            )
+        })?;
+        let mut out = Vec::with_capacity(input_columns.len());
+        ensure_required_present(input_columns, names, "BinaryEncoder")?;
+        for name in input_columns {
+            match names.iter().position(|fitted| fitted == name) {
+                Some(i) => {
+                    for j in 0..bits[i] {
+                        out.push(format!("{name}_bit_{j}"));
+                    }
+                }
+                None => out.push(name.clone()),
+            }
+        }
+        ensure_unique_names(&out, "BinaryEncoder")?;
+        Ok(out)
     }
 }
 

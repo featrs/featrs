@@ -12,6 +12,8 @@
 //! arrive alongside at least one `Float64` column are passed through
 //! unchanged.
 
+use crate::traits::FeatureNamesOut;
+use crate::traits::output_names::identity_names;
 use crate::traits::schema::{RequiresSchema, SchemaSpec};
 use crate::traits::{Error, Fit, Result, Transform};
 use crate::util::{replace_f64_column_opt, require_f64_columns};
@@ -147,6 +149,13 @@ impl Transform<DataFrame> for Binarizer {
 impl RequiresSchema for Binarizer {
     fn required_schema(&self) -> SchemaSpec {
         SchemaSpec::f64_columns(1)
+    }
+}
+
+impl FeatureNamesOut for Binarizer {
+    /// Output names are the input names: `transform` rewrites columns in place.
+    fn feature_names_out(&self, input_columns: &[String]) -> Result<Vec<String>> {
+        identity_names(self.fitted, "Binarizer", input_columns)
     }
 }
 

@@ -17,6 +17,8 @@
 //!   inspect and drop the cache.
 
 use crate::pipeline::{Pipeline, ensure_non_empty_rows};
+use crate::traits::FeatureNamesOut;
+use crate::traits::output_names::ensure_fitted;
 use crate::traits::{Error, Fit, Result, Transform};
 use polars::prelude::*;
 use std::cell::RefCell;
@@ -340,6 +342,21 @@ impl Cache {
     }
 }
 
+impl FeatureNamesOut for CachedPipeline {
+    /// The wrapped pipeline's plan; the cache does not change the schema.
+    fn feature_names_out(&self, input_columns: &[String]) -> Result<Vec<String>> {
+        ensure_fitted(self.fitted, "CachedPipeline")?;
+        let inner = self.inner.as_ref().ok_or_else(|| {
+            Error::NotFitted(
+                "CachedPipeline has not been fitted. \
+                 Call .fit(dataframe) before .feature_names_out()."
+                    .into(),
+            )
+        })?;
+        inner.feature_names_out(input_columns)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -348,6 +365,22 @@ mod tests {
     use crate::preprocessing::scaler::StandardScaler;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// These test-only transformers have no output plan of their own; their
+    /// identity plan is enough for the pipeline validation tests.
+    macro_rules! identity_feature_names {
+        ($($t:ty),* $(,)?) => {
+            $(impl crate::traits::FeatureNamesOut for $t {
+                fn feature_names_out(
+                    &self,
+                    input_columns: &[String],
+                ) -> crate::traits::Result<Vec<String>> {
+                    Ok(input_columns.to_vec())
+                }
+            })*
+        };
+    }
+    identity_feature_names!(CountingStep, FailingStep);
 
     /// Counts the transforms that reached it, so a test can tell a cache hit
     /// (no extra run) from a recomputation.

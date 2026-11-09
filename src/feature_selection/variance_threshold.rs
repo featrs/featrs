@@ -7,6 +7,8 @@
 //! values (e.g. all-`NaN` or all-`±Inf`) are dropped from selection, matching
 //! the crate-wide finite-values-only convention used by the scalers.
 
+use crate::traits::FeatureNamesOut;
+use crate::traits::output_names::subset_names;
 use crate::traits::schema::{RequiresSchema, SchemaSpec};
 use crate::traits::{Error, Fit, Result, Transform};
 use polars::prelude::*;
@@ -170,6 +172,18 @@ impl RequiresSchema for VarianceThreshold {
             ),
             None => SchemaSpec::f64_columns(1),
         }
+    }
+}
+
+impl FeatureNamesOut for VarianceThreshold {
+    /// The learned column subset, in selection order.
+    fn feature_names_out(&self, input_columns: &[String]) -> Result<Vec<String>> {
+        subset_names(
+            self.fitted,
+            "VarianceThreshold",
+            self.selected_columns.as_deref(),
+            input_columns,
+        )
     }
 }
 

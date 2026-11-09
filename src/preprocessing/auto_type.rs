@@ -7,6 +7,8 @@
 use crate::pipeline::DataFrameTransformer;
 use crate::preprocessing::encoder::OneHotEncoder;
 use crate::preprocessing::feature_hasher::FeatureHasher;
+use crate::traits::FeatureNamesOut;
+use crate::traits::output_names::ensure_fitted;
 use crate::traits::{Error, Fit, Result, Transform};
 use polars::prelude::*;
 
@@ -411,6 +413,57 @@ impl Transform<DataFrame> for AutoTypeDetector {
         }
 
         DataFrame::new(x.height(), out_cols).map_err(|e| Error::Computation(e.to_string()))
+    }
+}
+
+impl FeatureNamesOut for AutoTypeDetector {
+    /// The fit-time plan, with each categorical column replaced by its
+    /// encoder's generated names in place.
+    fn feature_names_out(&self, input_columns: &[String]) -> Result<Vec<String>> {
+        ensure_fitted(self.fitted, "AutoTypeDetector")?;
+        let types = self.column_types.as_ref().ok_or_else(|| {
+            Error::NotFitted(
+                "AutoTypeDetector has not been fitted. \
+                 Call .fit(dataframe) before .feature_names_out()."
+                    .into(),
+            )
+        })?;
+        let encoders = self.encoders.as_ref().ok_or_else(|| {
+            Error::NotFitted(
+                "AutoTypeDetector has not been fitted. \
+                 Call .fit(dataframe) before .feature_names_out()."
+                    .into(),
+            )
+        })?;
+        let mut out = Vec::new();
+        for (name, ctype) in types {
+            match ctype {
+                ColumnType::Numeric => {
+                    if input_columns.contains(name) {
+                        out.push(name.clone());
+                    }
+                }
+                ColumnType::Categorical | ColumnType::HighCardinality => {
+                    if !input_columns.contains(name) {
+                        return Err(Error::InvalidInput(format!(
+                            "AutoTypeDetector.feature_names_out: input column '{name}' not found."
+                        )));
+                    }
+                    let encoder = encoders
+                        .iter()
+                        .find(|(n, _)| n == name)
+                        .map(|(_, e)| e)
+                        .ok_or_else(|| {
+                            Error::Computation(format!(
+                                "AutoTypeDetector: no fitted encoder for column '{}'",
+                                name
+                            ))
+                        })?;
+                    out.extend(encoder.feature_names_out(std::slice::from_ref(name))?);
+                }
+            }
+        }
+        Ok(out)
     }
 }
 

@@ -4,6 +4,8 @@
 //! input features up to a specified degree. Analogous to
 //! `sklearn.preprocessing.PolynomialFeatures`.
 
+use crate::traits::FeatureNamesOut;
+use crate::traits::output_names::{ensure_fitted, ensure_required_present};
 use crate::traits::{Error, Fit, Result, Transform};
 use crate::util::{require_f64_columns, series_mul, series_pow};
 use polars::prelude::*;
@@ -430,6 +432,47 @@ impl Transform<DataFrame> for PolynomialFeatures {
 
         DataFrame::new(n_rows, columns)
             .map_err(|e| Error::Computation(format!("failed to create polynomial features: {}", e)))
+    }
+}
+
+impl FeatureNamesOut for PolynomialFeatures {
+    /// Bias (when enabled), the generated terms in power order, then the
+    /// columns that `transform` passes through unchanged.
+    fn feature_names_out(&self, input_columns: &[String]) -> Result<Vec<String>> {
+        ensure_fitted(self.fitted, "PolynomialFeatures")?;
+        let fitted_columns = self.input_columns.as_ref().ok_or_else(|| {
+            Error::NotFitted(
+                "PolynomialFeatures has not been fitted. \
+                 Call .fit(dataframe) before .feature_names_out()."
+                    .into(),
+            )
+        })?;
+        ensure_required_present(input_columns, fitted_columns, "PolynomialFeatures")?;
+        // NOTE: no input-collision check here. `transform` rebuilds the frame
+        // from the generated terms, so degree-1 terms intentionally reuse the
+        // fitted input names; only pass-through columns must not collide.
+        let mut names = Vec::new();
+        if self.include_bias {
+            names.push("bias".to_string());
+        }
+        for power in Self::generate_powers(fitted_columns.len(), self.degree, self.interaction_only)
+        {
+            if let Some(name) = Self::term_name(&power, fitted_columns) {
+                names.push(name);
+            }
+        }
+        for name in input_columns {
+            if !fitted_columns.contains(name) {
+                if names.contains(name) {
+                    return Err(Error::InvalidInput(format!(
+                        "PolynomialFeatures.feature_names_out: column '{name}', passed through \
+                         unchanged, collides with a generated column. Rename the input column."
+                    )));
+                }
+                names.push(name.clone());
+            }
+        }
+        Ok(names)
     }
 }
 

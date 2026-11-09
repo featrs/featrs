@@ -9,6 +9,8 @@
 //! pipeline.
 
 use crate::pipeline::{DataFrameTransformer, ensure_non_empty_rows};
+use crate::traits::FeatureNamesOut;
+use crate::traits::output_names::ensure_unique_names;
 use crate::traits::{Error, Fit, Result, Transform};
 use polars::prelude::*;
 use regex::Regex;
@@ -492,6 +494,68 @@ impl Transform<DataFrame> for ConditionalPipeline {
     }
 }
 
+impl FeatureNamesOut for ConditionalPipeline {
+    /// The plan's rule groups in rule order, then the fallback group.
+    fn feature_names_out(&self, input_columns: &[String]) -> Result<Vec<String>> {
+        let plan = self.plan.as_ref().ok_or_else(|| {
+            Error::NotFitted(
+                "ConditionalPipeline has not been fitted. \
+                 Call .fit(dataframe) before .feature_names_out()."
+                    .into(),
+            )
+        })?;
+        for columns in plan.by_rule.iter().flatten() {
+            if !input_columns.contains(columns) {
+                return Err(Error::InvalidInput(format!(
+                    "ConditionalPipeline.feature_names_out: routed column '{columns}' not found \
+                     in the input columns."
+                )));
+            }
+        }
+        if self.fallback.is_some() {
+            for name in &plan.unmatched {
+                if !input_columns.contains(name) {
+                    return Err(Error::InvalidInput(format!(
+                        "ConditionalPipeline.feature_names_out: fallback column '{name}' not \
+                         found in the input columns."
+                    )));
+                }
+            }
+        }
+        let mut names = Vec::new();
+        for (i, columns) in plan.by_rule.iter().enumerate() {
+            if columns.is_empty() {
+                continue;
+            }
+            let label = rule_label(i, &self.rules[i].0);
+            names.extend(
+                self.rules[i]
+                    .1
+                    .feature_names_out(columns)
+                    .map_err(|e| wrap_error(e, &label, "feature_names_out"))?,
+            );
+        }
+        if let Some(fallback) = self.fallback.as_ref()
+            && !plan.unmatched.is_empty()
+        {
+            names.extend(
+                fallback
+                    .feature_names_out(&plan.unmatched)
+                    .map_err(|e| wrap_error(e, FALLBACK_LABEL, "feature_names_out"))?,
+            );
+        }
+        if names.is_empty() {
+            return Err(Error::InvalidInput(
+                "ConditionalPipeline produced no output columns: every transformer dropped the \
+                 columns it was given."
+                    .into(),
+            ));
+        }
+        ensure_unique_names(&names, "ConditionalPipeline")?;
+        Ok(names)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -499,6 +563,30 @@ mod tests {
     use crate::preprocessing::encoder::OneHotEncoder;
     use crate::preprocessing::feature_hasher::FeatureHasher;
     use crate::preprocessing::scaler::StandardScaler;
+
+    /// These test-only transformers have no output plan of their own; their
+    /// identity plan is enough for the pipeline validation tests.
+    macro_rules! identity_feature_names {
+        ($($t:ty),* $(,)?) => {
+            $(impl crate::traits::FeatureNamesOut for $t {
+                fn feature_names_out(
+                    &self,
+                    input_columns: &[String],
+                ) -> crate::traits::Result<Vec<String>> {
+                    Ok(input_columns.to_vec())
+                }
+            })*
+        };
+    }
+    identity_feature_names!(Passthrough, RowDropper);
+    impl crate::traits::FeatureNamesOut for ColumnDropper {
+        fn feature_names_out(
+            &self,
+            _input_columns: &[String],
+        ) -> crate::traits::Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+    }
 
     /// Test-only transformer that drops every column but keeps the row count.
     struct ColumnDropper;

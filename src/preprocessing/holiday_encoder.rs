@@ -50,6 +50,10 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::traits::FeatureNamesOut;
+use crate::traits::output_names::{
+    ensure_fitted, ensure_generated_fresh, ensure_required_present, with_generated_names,
+};
 use crate::traits::{Error, Fit, Result, Transform};
 use polars::prelude::*;
 
@@ -767,6 +771,21 @@ impl Transform<DataFrame> for HolidayEncoder {
         }
 
         Ok(out)
+    }
+}
+
+impl FeatureNamesOut for HolidayEncoder {
+    /// The input columns plus `{column}_is_holiday` for every fitted column.
+    fn feature_names_out(&self, input_columns: &[String]) -> Result<Vec<String>> {
+        ensure_fitted(self.fitted, "HolidayEncoder")?;
+        ensure_required_present(input_columns, &self.columns, "HolidayEncoder")?;
+        let generated: Vec<String> = self
+            .columns
+            .iter()
+            .map(|col| format!("{col}_is_holiday"))
+            .collect();
+        ensure_generated_fresh(input_columns, &generated, "HolidayEncoder")?;
+        Ok(with_generated_names(input_columns, generated))
     }
 }
 

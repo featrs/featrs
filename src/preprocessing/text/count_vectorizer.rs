@@ -9,6 +9,8 @@
 //! The vocabulary is learned by `fit` from the training column and reused by
 //! `transform`; terms that were never seen during `fit` are silently dropped.
 
+use crate::traits::FeatureNamesOut;
+use crate::traits::output_names::{ensure_fitted, ensure_required_present};
 use crate::traits::{Error, Fit, Result, Transform};
 use polars::prelude::*;
 use regex::Regex;
@@ -495,6 +497,26 @@ impl Transform<DataFrame> for CountVectorizer {
             .collect();
 
         DataFrame::new(n_rows, out_cols).map_err(|e| Error::Computation(e.to_string()))
+    }
+}
+
+impl FeatureNamesOut for CountVectorizer {
+    /// One column per learned term, named after the term, in vocabulary order.
+    fn feature_names_out(&self, input_columns: &[String]) -> Result<Vec<String>> {
+        ensure_fitted(self.fitted, "CountVectorizer")?;
+        let column = self.column.as_ref().ok_or_else(|| {
+            Error::NotFitted(
+                "CountVectorizer has not been fitted. \
+                 Call .fit(dataframe) before .feature_names_out()."
+                    .into(),
+            )
+        })?;
+        ensure_required_present(
+            input_columns,
+            std::slice::from_ref(column),
+            "CountVectorizer",
+        )?;
+        Ok(self.terms.clone())
     }
 }
 
