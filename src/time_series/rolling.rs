@@ -24,7 +24,9 @@ pub enum RollingFn {
 /// Compute rolling window statistics.
 ///
 /// Input nulls retain their row positions. A complete window containing a
-/// null produces a null result.
+/// null produces a null result. Every configured column must be
+/// [`Float64`](DataType::Float64); `fit` rejects any other dtype with
+/// [`Error::InvalidInput`].
 ///
 /// # Example
 ///

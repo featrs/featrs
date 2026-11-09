@@ -100,6 +100,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `RollingAggregator::fit` and `Difference::fit` now reject configured columns
+  that are not `Float64` with `Error::InvalidInput`, instead of reporting the
+  transformer fitted and failing later at `transform`. Frames that previously
+  fit with a `String` or integer configured column now hard-error; cast those
+  columns before fitting (#221).
 - `PolynomialFeatures.transform` now carries columns of other dtypes (an
   identifier, a label) through unchanged, after the generated features.
   Previously it returned only the generated features,

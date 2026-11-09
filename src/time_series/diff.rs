@@ -7,6 +7,9 @@ use polars::prelude::*;
 
 /// Compute differences and percentage changes.
 ///
+/// Every configured column must be [`Float64`](DataType::Float64); `fit`
+/// rejects any other dtype with [`Error::InvalidInput`].
+///
 /// # Example
 ///
 /// ```rust
