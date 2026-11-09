@@ -152,6 +152,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now degenerate only when the endpoints are equal, so such a column ranks as
   `[0, 0.25, 0.5, 0.75, 1]`, while a genuinely constant column (including an
   all-zero one) keeps its documented `0.5` (#180).
+- `StringCleaner.fit` now validates each replacement template against the
+  pattern it runs on and returns `Error::InvalidInput` naming the bad
+  template, instead of passing it through to `transform`, where the `regex`
+  crate expands a reference to a nonexistent capture group into an empty
+  string and silently blanks every matched cell. A template such as
+  `.replace("[a-z]", "$1")` — `$1` on a pattern without capture groups — or
+  a `${name}` reference to an undefined group is now rejected at `fit`.
+  Valid templates are unaffected: `$0` (the whole match), in-range numbered
+  references, references to groups the pattern does define, and the `$$`
+  escape for a literal dollar sign all still fit and expand as before (#288).
 
 ## [0.5.0] - 2026-10-02
 

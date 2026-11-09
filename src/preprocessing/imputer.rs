@@ -1,7 +1,10 @@
 //! Missing value imputation.
 //!
-//! [`SimpleImputer`] replaces missing (`None` / `null`) values with
-//! a statistic computed from the non-missing values in each column.
+//! [`SimpleImputer`] replaces missing values with a statistic computed from
+//! the non-missing values in each column. Both `null` (`None`) and `NaN`
+//! cells count as missing, matching the crate-wide convention; the fill
+//! statistic is computed only from non-`NaN` values, and an all-`NaN` column
+//! is rejected like an all-null one.
 
 use crate::traits::{Error, Fit, Result, Transform};
 use polars::prelude::*;
@@ -22,7 +25,10 @@ pub enum Strategy {
 
 /// Impute missing values using basic statistics.
 ///
-/// Only operates on [`Float64`](DataType::Float64) columns.
+/// Only operates on [`Float64`](DataType::Float64) columns. A `NaN` cell
+/// counts as missing: it is excluded from the fill statistic, and a column
+/// that had missing values at fit fills its `NaN` cells through [`Transform`]
+/// like `null` cells.
 ///
 /// # Example
 ///
@@ -106,8 +112,12 @@ impl Fit<DataFrame> for SimpleImputer {
                     e
                 ))
             })?;
-            let all_vals: Vec<f64> = ca.iter().flatten().collect();
-            let has_missing = ca.iter().any(|v| v.is_none());
+            // `NaN` counts as missing, matching the crate convention used by
+            // the scalers: statistic inputs exclude `NaN`, so an all-`NaN`
+            // column is rejected like an all-null one instead of producing a
+            // `NaN` fill statistic that silently keeps the column broken.
+            let all_vals: Vec<f64> = ca.iter().flatten().filter(|v| !v.is_nan()).collect();
+            let has_missing = all_vals.len() < ca.len();
 
             if !has_missing {
                 continue;
@@ -117,8 +127,8 @@ impl Fit<DataFrame> for SimpleImputer {
                 Strategy::Mean => {
                     if all_vals.is_empty() {
                         return Err(Error::Computation(format!(
-                            "SimpleImputer(Mean): column '{}' has no non-null values. \
-                             Cannot compute the mean of an all-null column. \
+                            "SimpleImputer(Mean): column '{}' has no non-missing values. \
+                             Cannot compute the mean of an all-null or all-NaN column. \
                              Use Strategy::Constant instead.",
                             name
                         )));
@@ -130,8 +140,8 @@ impl Fit<DataFrame> for SimpleImputer {
                     sorted.sort_by(|a, b| a.total_cmp(b));
                     if sorted.is_empty() {
                         return Err(Error::Computation(format!(
-                            "SimpleImputer(Median): column '{}' has no non-null values. \
-                             Cannot compute the median of an all-null column. \
+                            "SimpleImputer(Median): column '{}' has no non-missing values. \
+                             Cannot compute the median of an all-null or all-NaN column. \
                              Use Strategy::Constant instead.",
                             name
                         )));
@@ -146,8 +156,8 @@ impl Fit<DataFrame> for SimpleImputer {
                 Strategy::MostFrequent => {
                     if all_vals.is_empty() {
                         return Err(Error::Computation(format!(
-                            "SimpleImputer(MostFrequent): column '{}' has no non-null values. \
-                             Cannot compute the mode of an all-null column. \
+                            "SimpleImputer(MostFrequent): column '{}' has no non-missing values. \
+                             Cannot compute the mode of an all-null or all-NaN column. \
                              Use Strategy::Constant instead.",
                             name
                         )));
@@ -161,7 +171,7 @@ impl Fit<DataFrame> for SimpleImputer {
                         .max_by(|a, b| a.1.cmp(&b.1).then_with(|| b.0.cmp(&a.0)))
                         .ok_or_else(|| {
                             Error::Computation(format!(
-                                "SimpleImputer(MostFrequent): column '{}' has no non-null values",
+                                "SimpleImputer(MostFrequent): column '{}' has no non-missing values",
                                 name
                             ))
                         })?;
@@ -217,8 +227,12 @@ impl Transform<DataFrame> for SimpleImputer {
                     e
                 ))
             })?;
-            let filled: ChunkedArray<Float64Type> =
-                ca.iter().map(|opt| opt.or(Some(*fill))).collect();
+            // `NaN` cells are missing too (fit excluded them from the
+            // statistics), so they are filled alongside null cells.
+            let filled: ChunkedArray<Float64Type> = ca
+                .iter()
+                .map(|opt| opt.filter(|v| !v.is_nan()).or(Some(*fill)))
+                .collect();
             out.replace(name.as_str(), filled.into_series().into())
                 .map_err(|e| {
                     Error::Computation(format!(
@@ -395,7 +409,7 @@ mod tests {
         let fit_result = imp.fit(df.clone());
         assert!(
             fit_result.is_err(),
-            "fitting an all-null column with Mean must error"
+            "fitting an all-null or all-NaN column with Mean must error"
         );
     }
 
@@ -405,5 +419,75 @@ mod tests {
         let x = Column::from(Series::new("x".into(), &[Some(1.0f64), None]));
         let df = DataFrame::new(2, vec![x]).unwrap();
         assert!(imp.transform(df).is_err());
+    }
+
+    #[test]
+    fn test_imputer_mean_nan_counts_as_missing() {
+        // NaN counts as missing (see #194): the mean statistic comes from the
+        // non-NaN values only, and both the NaN and the null cells are filled.
+        // [1.0, NaN, null, 3.0] -> mean 2.0 -> [1.0, 2.0, 2.0, 3.0].
+        let x = Column::from(Series::new(
+            "x".into(),
+            &[Some(1.0f64), Some(f64::NAN), None, Some(3.0)],
+        ));
+        let df = DataFrame::new(4, vec![x]).unwrap();
+
+        let mut imp = SimpleImputer::mean();
+        imp.fit(df.clone()).unwrap();
+        let result = imp.transform(df).unwrap();
+        let got: Vec<Option<f64>> = result.column("x").unwrap().f64().unwrap().iter().collect();
+        assert!(
+            got.iter().all(|v| v.is_some_and(|x| x.is_finite())),
+            "expected no missing cells left, got {got:?}"
+        );
+        assert_relative_eq!(got[0].unwrap(), 1.0);
+        assert_relative_eq!(got[1].unwrap(), 2.0, epsilon = 1e-9);
+        assert_relative_eq!(got[2].unwrap(), 2.0, epsilon = 1e-9);
+        assert_relative_eq!(got[3].unwrap(), 3.0);
+    }
+
+    #[test]
+    fn test_imputer_most_frequent_nan_counts_as_missing() {
+        // Mode ignores NaN: [NaN, NaN, 2.0, null] -> mode 2.0 -> [2.0; 4],
+        // not the former [NaN, NaN, 2.0, NaN].
+        let x = Column::from(Series::new(
+            "x".into(),
+            &[Some(f64::NAN), Some(f64::NAN), Some(2.0f64), None],
+        ));
+        let df = DataFrame::new(4, vec![x]).unwrap();
+
+        let mut imp = SimpleImputer::most_frequent();
+        imp.fit(df.clone()).unwrap();
+        let result = imp.transform(df).unwrap();
+        let got: Vec<Option<f64>> = result.column("x").unwrap().f64().unwrap().iter().collect();
+        for v in &got {
+            assert_relative_eq!(v.unwrap(), 2.0);
+        }
+    }
+
+    #[test]
+    fn test_imputer_all_nan_column_error() {
+        // An all-NaN column is rejected like an all-null one instead of
+        // silently passing every cell through unchanged.
+        let x = Column::from(Series::new("x".into(), &[Some(f64::NAN), Some(f64::NAN)]));
+        let df = DataFrame::new(2, vec![x]).unwrap();
+        let mut imp = SimpleImputer::mean();
+        let err = imp.fit(df).unwrap_err();
+        assert!(matches!(err, Error::Computation(_)), "got {err}");
+        assert!(err.to_string().contains("non-missing"), "got {err}");
+    }
+
+    #[test]
+    fn test_imputer_mixed_all_missing_column_error() {
+        // A column mixing nulls and NaNs is all-missing too, and must reach
+        // the same rejection path as an all-null or all-NaN column.
+        let x = Column::from(Series::new(
+            "x".into(),
+            &[Some(f64::NAN), None, Some(f64::NAN)],
+        ));
+        let df = DataFrame::new(3, vec![x]).unwrap();
+        let mut imp = SimpleImputer::mean();
+        let err = imp.fit(df).unwrap_err();
+        assert!(matches!(err, Error::Computation(_)), "got {err}");
     }
 }
