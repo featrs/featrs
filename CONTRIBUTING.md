@@ -12,7 +12,7 @@ cargo test
 ## Code style
 
 - `cargo fmt` before committing
-- `cargo clippy --all-targets --all-features -- -D warnings` must pass
+- `cargo clippy --all-targets --all-features -- -W clippy::cognitive_complexity -D warnings` must pass
 - 4-space indentation, no trailing whitespace
 - All public items must have doc comments (`///`)
 - Module-level `//!` docs for every `.rs` file
