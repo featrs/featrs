@@ -284,11 +284,16 @@ impl FeatureNamesOut for ColumnTransformer {
                 }
             }
             names.extend(transformer.feature_names_out(columns).map_err(|e| {
-                Error::Computation(format!(
+                let msg = format!(
                     "ColumnTransformer: transformer '{}' failed during \
                              feature_names_out: {}",
                     t_name, e
-                ))
+                );
+                match e {
+                    Error::NotFitted(_) => Error::NotFitted(msg),
+                    Error::InvalidInput(_) => Error::InvalidInput(msg),
+                    Error::Computation(_) => Error::Computation(msg),
+                }
             })?);
         }
         if matches!(self.remainder, Remainder::Passthrough) {

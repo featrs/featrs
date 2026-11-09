@@ -9,7 +9,9 @@
 //!
 //! The trait is implemented by every transformer. Transformers that preserve
 //! their input names return the names they are given, selectors return their
-//! learned subset, and generators append the names they will create. The
+//! learned subset, and generators report their output names. Generators may
+//! append columns or replace input columns in place (for example
+//! `AutoTypeDetector` expands categorical columns where they appear). The
 //! result is always the exact column list, in order, that `transform` produces
 //! for a frame with those input columns.
 //!
@@ -102,13 +104,15 @@ pub(crate) fn subset_names(
 ///
 /// This mirrors transformers that append with `with_column`; for those a
 /// colliding name replaces the input column rather than creating a duplicate.
+/// A seen-set keeps this linear when many names are generated.
 pub(crate) fn with_generated_names(
     input_columns: &[String],
     generated: impl IntoIterator<Item = String>,
 ) -> Vec<String> {
     let mut names = input_columns.to_vec();
+    let mut seen: std::collections::HashSet<String> = input_columns.iter().cloned().collect();
     for name in generated {
-        if !names.contains(&name) {
+        if seen.insert(name.clone()) {
             names.push(name);
         }
     }
