@@ -100,6 +100,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `FeatureUnion::fit` now rejects a DataFrame with 0 columns with
+  `Error::InvalidInput`, matching `ColumnTransformer` and
+  `ConditionalPipeline`, instead of fitting and failing later at `transform`
+  with "produced no output columns" (#253).
 - `PolynomialFeatures.transform` now carries columns of other dtypes (an
   identifier, a label) through unchanged, after the generated features.
   Previously it returned only the generated features,
