@@ -35,7 +35,9 @@ pub trait ScoreFunction: Send + Sync {
 /// zero. Rows with a null feature value or null target are excluded per column,
 /// and the degrees of freedom are computed from the remaining observations. A
 /// feature with no usable values, or with fewer than two observed target
-/// classes, is rejected.
+/// classes, is rejected. Deviations outside the finite `f64` range are
+/// rejected with [`Error::InvalidInput`]; center or scale the feature before
+/// scoring.
 ///
 /// Requires the target column to be [`Float64`](DataType::Float64).
 pub struct FClassif;
@@ -175,6 +177,17 @@ impl ScoreFunction for FClassif {
                 }
             }
 
+            // Centering happens before the scale is derived. If a finite
+            // input still produces a non-finite deviation, the scaled sums
+            // below would collapse to NaN and the branch at the end would
+            // report a silent 0.0. Reject it instead, as gh-268 permits.
+            if !scale.is_finite() {
+                return Err(Error::InvalidInput(format!(
+                    "FClassif: column '{name}' has deviations outside the finite f64 range. \
+                     Center or scale the column before scoring."
+                )));
+            }
+
             let mut ss_between = 0.0;
             let mut ss_within = 0.0;
             for (group_to_feature_mean, devs) in &groups {
@@ -221,7 +234,9 @@ impl ScoreFunction for FClassif {
 /// to the target scores positive infinity; a constant feature, a constant
 /// target, and any feature with fewer than three usable observations score
 /// zero. Rows with a null feature value or null target are excluded per column,
-/// and `n` is the number of remaining observations.
+/// and `n` is the number of remaining observations. Deviations outside the
+/// finite `f64` range are rejected with [`Error::InvalidInput`]; center or
+/// scale the feature and target before scoring.
 ///
 /// Requires the target column to be [`Float64`](DataType::Float64).
 pub struct FRegression;
@@ -321,6 +336,16 @@ impl ScoreFunction for FRegression {
             for (&feature_dev, &target_dev) in feature_devs.iter().zip(&target_devs) {
                 feature_scale = feature_scale.max(feature_dev.abs());
                 target_scale = target_scale.max(target_dev.abs());
+            }
+
+            // Centering happens before the scales are derived. A finite input
+            // can still produce a non-finite deviation, and the squares below
+            // would become NaN. Reject it instead, as gh-268 permits.
+            if !feature_scale.is_finite() || !target_scale.is_finite() {
+                return Err(Error::InvalidInput(format!(
+                    "FRegression: column '{name}' has deviations outside the finite f64 range. \
+                     Center or scale the feature and target before scoring."
+                )));
             }
 
             let mut ss_feature = 0.0;
@@ -559,13 +584,70 @@ mod tests {
         // positive-infinity for a perfect fit.
         let target = Column::from(Series::new("t".into(), &[1.0f64, 2.0, 3.5, 4.0]));
         let features = DataFrame::new(4, vec![noise, linear]).unwrap();
-        let y = DataFrame::new(4, vec![target.clone()]).unwrap();
 
         let scores = FRegression.score(&features, &target).unwrap();
         let linear_score = scores.iter().find(|(name, _)| name == "linear").unwrap().1;
         let noise_score = scores.iter().find(|(name, _)| name == "noise").unwrap().1;
         assert!(linear_score.is_finite(), "linear scored {linear_score}");
         assert!(linear_score > noise_score);
+    }
+
+    #[test]
+    fn test_f_classif_rejects_deviations_outside_finite_range() {
+        // Centering overflows before the scale is derived, so the scaled sums
+        // cannot recover. Reject the input instead of reporting a silent 0.0.
+        let signal = Column::from(Series::new("signal".into(), &[0.0f64, 0.0, 1e308, 1e308]));
+        let target = Column::from(Series::new("t".into(), &[0.0f64, 0.0, 1.0, 1.0]));
+        let features = DataFrame::new(4, vec![signal]).unwrap();
+
+        let err = FClassif.score(&features, &target).unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidInput(ref msg) if msg.contains("finite f64 range")),
+            "expected InvalidInput, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_f_regression_rejects_deviations_outside_finite_range() {
+        let linear = Column::from(Series::new(
+            "linear".into(),
+            &[0.0f64, 5e307, 1e308, 1.5e308],
+        ));
+        let target = Column::from(Series::new("t".into(), &[0.0f64, 1.0, 2.0, 3.0]));
+        let features = DataFrame::new(4, vec![linear]).unwrap();
+
+        let err = FRegression.score(&features, &target).unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidInput(ref msg) if msg.contains("finite f64 range")),
+            "expected InvalidInput, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_f_classif_underflow_matches_ordinary_scale() {
+        // The other half of gh-268: 1e-200 inputs used to score 0.0. The
+        // rescale must give the same score as the ordinary-scale column.
+        let tiny = Column::from(Series::new(
+            "tiny".into(),
+            &[1e-200f64, 1.1e-200, 3e-200, 3.1e-200],
+        ));
+        let normal = Column::from(Series::new("normal".into(), &[1.0f64, 1.1, 3.0, 3.1]));
+        let target = Column::from(Series::new("t".into(), &[0.0f64, 0.0, 1.0, 1.0]));
+        let f = FClassif::new();
+        let tiny_score = f
+            .score(&DataFrame::new(4, vec![tiny]).unwrap(), &target)
+            .unwrap()[0]
+            .1;
+        let normal_score = f
+            .score(&DataFrame::new(4, vec![normal]).unwrap(), &target)
+            .unwrap()[0]
+            .1;
+
+        assert!(tiny_score.is_finite(), "tiny scored {tiny_score}");
+        assert!(
+            (tiny_score - normal_score).abs() / normal_score < 1e-12,
+            "tiny={tiny_score} normal={normal_score}"
+        );
     }
 
     #[test]
