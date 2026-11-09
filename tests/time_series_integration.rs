@@ -2,7 +2,7 @@ use featrs::time_series::cyclical::CyclicalEncoder;
 use featrs::time_series::diff::Difference;
 use featrs::time_series::lag::Lagger;
 use featrs::time_series::rolling::{RollingAggregator, RollingFn};
-use featrs::traits::{Fit, Transform};
+use featrs::traits::{Error, Fit, Transform};
 use polars::prelude::{Column, DataFrame, NamedFrom, Series};
 
 fn sales_df() -> DataFrame {
@@ -72,4 +72,38 @@ fn test_cyclical_encoder_integration() {
     // CyclicalEncoder adds sin + cos columns for each input column.
     assert!(result.width() >= 2);
     assert_eq!(result.height(), 5);
+}
+
+#[test]
+fn test_rolling_fit_rejects_non_float64_columns() {
+    // A valid column first proves the check reaches every configured column,
+    // not just the first one.
+    let good = Column::from(Series::new("good".into(), &[1.0_f64, 2.0, 3.0]));
+    let bad = Column::from(Series::new("bad".into(), &["a", "b", "c"]));
+    let df = DataFrame::new(3, vec![good, bad]).unwrap();
+
+    let mut rolling = RollingAggregator::new(&["good", "bad"], 2, RollingFn::Mean);
+    let err = rolling.fit(df).unwrap_err();
+    assert!(
+        matches!(err, Error::InvalidInput(ref msg)
+            if msg.contains("column 'bad'") && msg.contains("expected Float64")),
+        "expected InvalidInput naming the String column, got {err:?}"
+    );
+}
+
+#[test]
+fn test_difference_fit_rejects_non_float64_columns() {
+    // Difference::fit had the same gap: existence checked, dtype not,
+    // so transform failed with InvalidInput for types visible at fit.
+    let good = Column::from(Series::new("good".into(), &[1.0_f64, 2.0, 3.0]));
+    let bad = Column::from(Series::new("bad".into(), &[1_i64, 2, 3]));
+    let df = DataFrame::new(3, vec![good, bad]).unwrap();
+
+    let mut d = Difference::diff(&["good", "bad"], 1);
+    let err = d.fit(df).unwrap_err();
+    assert!(
+        matches!(err, Error::InvalidInput(ref msg)
+            if msg.contains("column 'bad'") && msg.contains("expected Float64")),
+        "expected InvalidInput naming the Int64 column, got {err:?}"
+    );
 }
