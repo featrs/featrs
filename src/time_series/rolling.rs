@@ -120,7 +120,9 @@ impl RollingAggregator {
 impl Fit<DataFrame> for RollingAggregator {
     type Output = ();
 
+    /// Validate the input and mark the aggregator fitted. A failed fit leaves it unfitted.
     fn fit(&mut self, x: DataFrame) -> Result<()> {
+        self.fitted = false;
         if self.columns.is_empty() {
             return Err(Error::InvalidInput(
                 "RollingAggregator: at least one column is required.".into(),
@@ -237,5 +239,27 @@ mod tests {
             rolling_mean(&[None, Some(2.0), Some(4.0), None], 2),
             vec![None, None, Some(3.0), None]
         );
+    }
+
+    #[test]
+    fn test_failed_refit_resets_fitted_state() {
+        let good = DataFrame::new(
+            3,
+            vec![Column::from(Series::new("x".into(), &[1.0_f64, 2.0, 3.0]))],
+        )
+        .unwrap();
+        let bad = DataFrame::new(
+            3,
+            vec![Column::from(Series::new(
+                "missing".into(),
+                &[1.0_f64, 2.0, 3.0],
+            ))],
+        )
+        .unwrap();
+        let mut r = RollingAggregator::new(&["x"], 2, RollingFn::Mean);
+
+        r.fit(good.clone()).unwrap();
+        assert!(r.fit(bad).is_err());
+        assert!(matches!(r.transform(good), Err(Error::NotFitted(_))));
     }
 }

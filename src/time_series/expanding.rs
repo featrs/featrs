@@ -148,7 +148,9 @@ impl Default for ExpandingAggregator {
 impl Fit<DataFrame> for ExpandingAggregator {
     type Output = ();
 
+    /// Validate the input and mark the aggregator fitted. A failed fit leaves it unfitted.
     fn fit(&mut self, x: DataFrame) -> Result<()> {
+        self.fitted = false;
         if x.height() == 0 {
             return Err(Error::InvalidInput(
                 "ExpandingAggregator.fit received a DataFrame with 0 rows. \
@@ -399,11 +401,76 @@ mod tests {
     }
 
     #[test]
+    fn test_failed_refit_resets_fitted_state() {
+        let good = make_df(&[1.0, 2.0, 3.0]);
+        let bad = DataFrame::new(
+            3,
+            vec![Column::from(Series::new(
+                "missing".into(),
+                &[1.0_f64, 2.0, 3.0],
+            ))],
+        )
+        .unwrap();
+        let mut e = ExpandingAggregator::new(&["x"], ExpandingFn::Mean);
+
+        e.fit(good.clone()).unwrap();
+        assert!(e.fit(bad).is_err());
+        assert!(matches!(e.transform(good), Err(Error::NotFitted(_))));
+
+        let recovery = make_df(&[4.0, 6.0]);
+        e.fit(recovery.clone()).unwrap();
+        let result = e.transform(recovery).unwrap();
+        assert_eq!(
+            result
+                .column("x_expanding_mean")
+                .unwrap()
+                .f64()
+                .unwrap()
+                .get(1),
+            Some(5.0)
+        );
+    }
+
+    #[test]
+    fn test_invalid_dtype_refit_resets_fitted_state() {
+        let good = make_df(&[1.0, 2.0]);
+        let bad =
+            DataFrame::new(2, vec![Column::from(Series::new("x".into(), &["a", "b"]))]).unwrap();
+        let mut e = ExpandingAggregator::new(&["x"], ExpandingFn::Mean);
+
+        e.fit(good.clone()).unwrap();
+        assert!(matches!(e.fit(bad), Err(Error::InvalidInput(_))));
+        assert!(matches!(e.transform(good), Err(Error::NotFitted(_))));
+    }
+
+    #[test]
+    fn test_empty_refit_resets_fitted_state() {
+        let good = make_df(&[1.0, 2.0, 3.0]);
+        let empty = make_df(&[]);
+        let mut e = ExpandingAggregator::new(&["x"], ExpandingFn::Mean);
+
+        e.fit(good.clone()).unwrap();
+        assert!(matches!(e.fit(empty), Err(Error::InvalidInput(_))));
+        assert!(matches!(e.transform(good), Err(Error::NotFitted(_))));
+    }
+
+    #[test]
     fn test_min_periods_zero_errors() {
         let df = make_df(&[1.0, 2.0]);
         let mut e = ExpandingAggregator::new(&["x"], ExpandingFn::Mean).min_periods(0);
         let err = e.fit(df).unwrap_err();
         assert!(matches!(err, Error::InvalidInput(_)));
+    }
+
+    #[test]
+    fn test_zero_min_periods_refit_resets_fitted_state() {
+        let good = make_df(&[1.0, 2.0]);
+        let mut e = ExpandingAggregator::new(&["x"], ExpandingFn::Mean);
+        e.fit(good.clone()).unwrap();
+
+        let mut e = e.min_periods(0);
+        assert!(matches!(e.fit(good.clone()), Err(Error::InvalidInput(_))));
+        assert!(matches!(e.transform(good), Err(Error::NotFitted(_))));
     }
 
     #[test]
