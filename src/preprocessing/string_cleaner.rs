@@ -34,7 +34,9 @@ pub enum CaseStyle {
 pub struct StringReplacement {
     /// Rust `regex` pattern to match.
     pub pattern: String,
-    /// Replacement text; capture references such as `$1` are supported.
+    /// Replacement text; capture references such as `$1` are supported and
+    /// must resolve against [`pattern`](Self::pattern), as checked at
+    /// [`fit`](Fit::fit).
     pub replacement: String,
 }
 
@@ -830,6 +832,41 @@ mod tests {
             cleaner.transform(wrong_type),
             Err(Error::InvalidInput(_))
         ));
+    }
+
+    #[test]
+    fn test_unbraced_reference_takes_the_full_name() {
+        // An unbraced reference consumes every valid name byte, so `$1a`
+        // references the group named "1a", not group 1 followed by "a".
+        let df = frame(&[Some("abc123")]);
+        let mut cleaner = StringCleaner::new()
+            .columns(&["text"])
+            .replace("([a-z]+)([0-9]+)", "$1a");
+        let error = cleaner.fit(df).unwrap_err();
+
+        assert!(matches!(error, Error::InvalidInput(_)));
+        assert!(
+            error.to_string().contains("$1a"),
+            "message names the template: {error}"
+        );
+    }
+
+    #[test]
+    fn test_failed_template_refit_clears_fitted_state() {
+        let df = frame(&[Some("abc123")]);
+        let mut cleaner = StringCleaner::new()
+            .columns(&["text"])
+            .replace("[a-z]+", "<$0>");
+        cleaner.fit(df.clone()).unwrap();
+
+        // A template failure on re-fit must leave the cleaner unfitted,
+        // just like the dtype failure covered by the refit test above.
+        cleaner = cleaner.replace("[0-9]+", "$1");
+        assert!(matches!(
+            cleaner.fit(df.clone()),
+            Err(Error::InvalidInput(_))
+        ));
+        assert!(matches!(cleaner.transform(df), Err(Error::NotFitted(_))));
     }
 
     #[test]
