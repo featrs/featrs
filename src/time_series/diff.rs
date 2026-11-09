@@ -2,6 +2,8 @@
 //!
 //! [`Difference`] computes `x[t] - x[t - period]` and percentage change.
 
+use crate::traits::FeatureNamesOut;
+use crate::traits::output_names::{ensure_fitted, ensure_required_present};
 use crate::traits::{Error, Fit, Result, Transform};
 use polars::prelude::*;
 
@@ -142,6 +144,24 @@ impl Transform<DataFrame> for Difference {
         }
 
         Ok(out)
+    }
+}
+
+impl FeatureNamesOut for Difference {
+    /// The input columns plus `{column}_{diff|pct}_{period}`.
+    fn feature_names_out(&self, input_columns: &[String]) -> Result<Vec<String>> {
+        ensure_fitted(self.fitted, "Difference")?;
+        let suffix = if self.pct_change { "pct" } else { "diff" };
+        // `transform` reads each source from the growing output frame.
+        let mut names = input_columns.to_vec();
+        for col in &self.columns {
+            ensure_required_present(&names, std::slice::from_ref(col), "Difference")?;
+            let generated = format!("{col}_{suffix}_{}", self.period);
+            if !names.contains(&generated) {
+                names.push(generated);
+            }
+        }
+        Ok(names)
     }
 }
 

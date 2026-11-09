@@ -8,6 +8,8 @@
 //! target value prevents target leakage into the training features, which
 //! dramatically reduces overfitting compared to plain target encoding.
 
+use crate::traits::FeatureNamesOut;
+use crate::traits::output_names::identity_names;
 use crate::traits::{Error, FitSupervised, Result, Transform};
 use polars::prelude::*;
 use std::collections::HashMap;
@@ -550,6 +552,41 @@ impl Transform<DataFrame> for LeaveOneOutEncoder {
             })?;
         }
         Ok(out)
+    }
+}
+
+impl FeatureNamesOut for LeaveOneOutEncoder {
+    /// Output names are the input names: `transform` rewrites columns in place.
+    ///
+    /// `transform` only accepts the exact training frame (columns may be
+    /// reordered, but names alone cannot validate rows or values), so a
+    /// different column set is an [`Error::InvalidInput`].
+    fn feature_names_out(&self, input_columns: &[String]) -> Result<Vec<String>> {
+        let names = identity_names(self.fitted, "LeaveOneOutEncoder", input_columns)?;
+        let training_source = self.training_source.as_ref().ok_or_else(|| {
+            Error::NotFitted(
+                "LeaveOneOutEncoder has not been fitted. \
+                 Call .fit(dataframe) before .feature_names_out()."
+                    .into(),
+            )
+        })?;
+        let trained: Vec<String> = training_source
+            .get_column_names()
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let same_set = input_columns.len() == trained.len()
+            && trained.iter().all(|name| input_columns.contains(name));
+        if !same_set {
+            return Err(Error::InvalidInput(
+                "LeaveOneOutEncoder.feature_names_out: input columns differ from the \
+                 training frame columns. transform only accepts the exact training frame \
+                 (reordered columns are allowed, but names alone cannot validate rows \
+                 or values)."
+                    .into(),
+            ));
+        }
+        Ok(names)
     }
 }
 

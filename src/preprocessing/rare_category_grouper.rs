@@ -9,6 +9,8 @@ use std::collections::{HashMap, HashSet};
 
 use polars::prelude::*;
 
+use crate::traits::FeatureNamesOut;
+use crate::traits::output_names::{ensure_required_present, identity_names};
 use crate::traits::{Error, Fit, Result, Transform};
 
 /// The threshold that decides which categories are considered rare.
@@ -302,6 +304,15 @@ impl Transform<DataFrame> for RareCategoryGrouper {
         }
 
         Ok(output)
+    }
+}
+
+impl FeatureNamesOut for RareCategoryGrouper {
+    /// Output names are the input names: `transform` rewrites columns in place.
+    fn feature_names_out(&self, input_columns: &[String]) -> Result<Vec<String>> {
+        let names = identity_names(self.fitted, "RareCategoryGrouper", input_columns)?;
+        ensure_required_present(input_columns, &self.columns, "RareCategoryGrouper")?;
+        Ok(names)
     }
 }
 

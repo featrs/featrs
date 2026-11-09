@@ -3,7 +3,9 @@
 use polars::prelude::*;
 use statrs::distribution::{ContinuousCDF, Normal};
 
+use crate::traits::FeatureNamesOut;
 use crate::traits::inverse::{HasInverse, InverseTransform};
+use crate::traits::output_names::{ensure_required_present, identity_names};
 use crate::traits::{Error, Fit, Result, Transform};
 use crate::util::{replace_f64_column, require_f64_columns};
 
@@ -395,6 +397,18 @@ fn map_value_to_rank(v: f64, min_ref: f64, max_ref: f64, references: &[f64], n_q
     // top can be degenerate.
     let t = (v - r_lo) / (r_hi - r_lo);
     (lo as f64 + t) / (n_q - 1) as f64
+}
+
+impl FeatureNamesOut for QuantileTransformer {
+    /// Output names are the input names: `transform` rewrites columns in place.
+    fn feature_names_out(&self, input_columns: &[String]) -> Result<Vec<String>> {
+        let names = identity_names(self.fitted, "QuantileTransformer", input_columns)?;
+        if let Some(references) = &self.references {
+            let required: Vec<String> = references.iter().map(|r| r.name.clone()).collect();
+            ensure_required_present(input_columns, &required, "QuantileTransformer")?;
+        }
+        Ok(names)
+    }
 }
 
 #[cfg(test)]

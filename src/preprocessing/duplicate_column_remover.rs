@@ -12,6 +12,8 @@
 //! Complexity: the naive pairwise comparison is O(rows × columns²), which is
 //! fine for typical column counts; hash-based grouping is not used.
 
+use crate::traits::FeatureNamesOut;
+use crate::traits::output_names::subset_names;
 use crate::traits::{Error, Fit, Result, Transform};
 use polars::prelude::*;
 
@@ -193,6 +195,18 @@ impl Transform<DataFrame> for DuplicateColumnRemover {
         let refs: Vec<&str> = cols.iter().map(|s| s.as_str()).collect();
         x.select(refs)
             .map_err(|e| Error::Computation(e.to_string()))
+    }
+}
+
+impl FeatureNamesOut for DuplicateColumnRemover {
+    /// The columns that survived the last fit, in frame order.
+    fn feature_names_out(&self, input_columns: &[String]) -> Result<Vec<String>> {
+        subset_names(
+            self.fitted,
+            "DuplicateColumnRemover",
+            self.selected_columns.as_deref(),
+            input_columns,
+        )
     }
 }
 

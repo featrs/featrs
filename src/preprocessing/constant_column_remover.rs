@@ -5,6 +5,8 @@
 //! Unlike [`VarianceThreshold`](crate::feature_selection::VarianceThreshold),
 //! it operates on **all** dtypes, not just `Float64`.
 
+use crate::traits::FeatureNamesOut;
+use crate::traits::output_names::subset_names;
 use crate::traits::{Error, Fit, Result, Transform};
 use polars::prelude::*;
 
@@ -170,6 +172,18 @@ impl Transform<DataFrame> for ConstantColumnRemover {
         let refs: Vec<&str> = cols.iter().map(|s| s.as_str()).collect();
         x.select(refs)
             .map_err(|e| Error::Computation(e.to_string()))
+    }
+}
+
+impl FeatureNamesOut for ConstantColumnRemover {
+    /// The columns that survived the last fit, in frame order.
+    fn feature_names_out(&self, input_columns: &[String]) -> Result<Vec<String>> {
+        subset_names(
+            self.fitted,
+            "ConstantColumnRemover",
+            self.selected_columns.as_deref(),
+            input_columns,
+        )
     }
 }
 

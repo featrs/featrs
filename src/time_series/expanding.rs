@@ -4,6 +4,8 @@
 //! deviation over a growing window: at each row `i` the statistic is
 //! computed over all rows `0..=i`. Analogous to `df.expanding()` in pandas.
 
+use crate::traits::FeatureNamesOut;
+use crate::traits::output_names::{ensure_fitted, ensure_required_present, with_generated_names};
 use crate::traits::{Error, Fit, Result, Transform};
 use polars::prelude::*;
 
@@ -224,6 +226,27 @@ impl Transform<DataFrame> for ExpandingAggregator {
         }
 
         Ok(out)
+    }
+}
+
+impl FeatureNamesOut for ExpandingAggregator {
+    /// The input columns plus `{column}_expanding_{function}`.
+    fn feature_names_out(&self, input_columns: &[String]) -> Result<Vec<String>> {
+        ensure_fitted(self.fitted, "ExpandingAggregator")?;
+        // `transform` snapshots each source from the immutable input frame.
+        ensure_required_present(input_columns, &self.columns, "ExpandingAggregator")?;
+        let fn_name = match self.function {
+            ExpandingFn::Mean => "mean",
+            ExpandingFn::Sum => "sum",
+            ExpandingFn::Min => "min",
+            ExpandingFn::Max => "max",
+            ExpandingFn::Std => "std",
+        };
+        let generated = self
+            .columns
+            .iter()
+            .map(|col| format!("{col}_expanding_{fn_name}"));
+        Ok(with_generated_names(input_columns, generated))
     }
 }
 

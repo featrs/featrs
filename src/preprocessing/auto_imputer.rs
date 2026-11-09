@@ -16,6 +16,8 @@ use polars::prelude::*;
 use super::imputer::{SimpleImputer, Strategy};
 use crate::pipeline::DataFrameTransformer;
 use crate::pipeline::column_transformer::{ColumnTransformer, Remainder};
+use crate::traits::FeatureNamesOut;
+use crate::traits::output_names::ensure_fitted;
 use crate::traits::{Error, Fit, Result, Transform};
 use crate::util::require_f64_columns;
 
@@ -482,6 +484,25 @@ fn fit_plan(plan: &[(String, ImputationStrategy)], x: &DataFrame) -> Result<Colu
     let mut composite = ColumnTransformer::new(named, Remainder::Passthrough);
     composite.fit(x.clone())?;
     Ok(composite)
+}
+
+impl FeatureNamesOut for AutoImputer {
+    /// Delegate to the fitted composite, then remove the dropped columns.
+    fn feature_names_out(&self, input_columns: &[String]) -> Result<Vec<String>> {
+        ensure_fitted(self.fitted, "AutoImputer")?;
+        let chosen = self.chosen.as_ref().ok_or_else(|| {
+            Error::NotFitted(
+                "AutoImputer has not been fitted. \
+                 Call .fit(dataframe) before .feature_names_out()."
+                    .into(),
+            )
+        })?;
+        Ok(chosen
+            .feature_names_out(input_columns)?
+            .into_iter()
+            .filter(|name| !self.dropped.contains(name))
+            .collect())
+    }
 }
 
 #[cfg(test)]
