@@ -5,7 +5,7 @@
 //! `sklearn.preprocessing.PolynomialFeatures`.
 
 use crate::traits::FeatureNamesOut;
-use crate::traits::output_names::ensure_fitted;
+use crate::traits::output_names::{ensure_fitted, ensure_required_present};
 use crate::traits::{Error, Fit, Result, Transform};
 use crate::util::{require_f64_columns, series_mul, series_pow};
 use polars::prelude::*;
@@ -437,6 +437,10 @@ impl FeatureNamesOut for PolynomialFeatures {
                     .into(),
             )
         })?;
+        ensure_required_present(input_columns, fitted_columns, "PolynomialFeatures")?;
+        // NOTE: no input-collision check here. `transform` rebuilds the frame
+        // from the generated terms, so degree-1 terms intentionally reuse the
+        // fitted input names; only pass-through columns must not collide.
         let mut names = Vec::new();
         if self.include_bias {
             names.push("bias".to_string());
@@ -449,6 +453,12 @@ impl FeatureNamesOut for PolynomialFeatures {
         }
         for name in input_columns {
             if !fitted_columns.contains(name) {
+                if names.contains(name) {
+                    return Err(Error::InvalidInput(format!(
+                        "PolynomialFeatures.feature_names_out: column '{name}', passed through \
+                         unchanged, collides with a generated column. Rename the input column."
+                    )));
+                }
                 names.push(name.clone());
             }
         }

@@ -4,7 +4,7 @@
 //! over a fixed window. Analogous to `df.rolling()` in pandas.
 
 use crate::traits::FeatureNamesOut;
-use crate::traits::output_names::{ensure_fitted, with_generated_names};
+use crate::traits::output_names::{ensure_fitted, ensure_required_present};
 use crate::traits::{Error, Fit, Result, Transform};
 use polars::prelude::*;
 
@@ -201,11 +201,16 @@ impl FeatureNamesOut for RollingAggregator {
             RollingFn::Max => "max",
             RollingFn::Sum => "sum",
         };
-        let generated = self
-            .columns
-            .iter()
-            .map(|col| format!("{col}_{fn_name}_{}", self.window_size));
-        Ok(with_generated_names(input_columns, generated))
+        // `transform` reads each source from the growing output frame.
+        let mut names = input_columns.to_vec();
+        for col in &self.columns {
+            ensure_required_present(&names, std::slice::from_ref(col), "RollingAggregator")?;
+            let generated = format!("{col}_{fn_name}_{}", self.window_size);
+            if !names.contains(&generated) {
+                names.push(generated);
+            }
+        }
+        Ok(names)
     }
 }
 

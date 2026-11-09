@@ -20,7 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   every step, and `ColumnTransformer`, `FeatureUnion`, `ConditionalPipeline`,
   and `CachedPipeline` aggregate their children in the same order their
   `transform` stacks them (#83). Custom `DataFrameTransformer` implementations
-  must add a `FeatureNamesOut` implementation.
+  inherit an identity default, so they keep compiling, and should override it
+  when their `transform` drops, renames, or generates columns.
 
 - `InverseTransform<X>` in `src/traits/inverse.rs` reverses an invertible
   transformer: `inverse_transform` maps data from the transformer's output space

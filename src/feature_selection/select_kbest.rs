@@ -522,8 +522,13 @@ impl Transform<DataFrame> for SelectKBest {
 
 impl FeatureNamesOut for SelectKBest {
     /// The learned column subset, in selection order.
-    fn feature_names_out(&self, _input_columns: &[String]) -> Result<Vec<String>> {
-        subset_names(self.fitted, "SelectKBest", self.selected_columns.as_deref())
+    fn feature_names_out(&self, input_columns: &[String]) -> Result<Vec<String>> {
+        subset_names(
+            self.fitted,
+            "SelectKBest",
+            self.selected_columns.as_deref(),
+            input_columns,
+        )
     }
 }
 

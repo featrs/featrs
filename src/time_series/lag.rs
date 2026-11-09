@@ -4,7 +4,7 @@
 //! in forecasting models. Analogous to `df.shift()` in pandas.
 
 use crate::traits::FeatureNamesOut;
-use crate::traits::output_names::{ensure_fitted, with_generated_names};
+use crate::traits::output_names::{ensure_fitted, ensure_required_present};
 use crate::traits::{Error, Fit, Result, Transform};
 use polars::prelude::*;
 use std::collections::HashSet;
@@ -126,12 +126,20 @@ impl FeatureNamesOut for Lagger {
     /// The input columns plus `{column}_lag_{period}`, in configuration order.
     fn feature_names_out(&self, input_columns: &[String]) -> Result<Vec<String>> {
         ensure_fitted(self.fitted, "Lagger")?;
-        let generated = self.columns.iter().flat_map(|col| {
-            self.periods
-                .iter()
-                .map(move |period| format!("{col}_lag_{period}"))
-        });
-        Ok(with_generated_names(input_columns, generated))
+        // `transform` reads each source from the growing output frame, so a
+        // source may be satisfied by an earlier generated column. Mirror that
+        // order: validate against the evolving name set.
+        let mut names = input_columns.to_vec();
+        for col in &self.columns {
+            ensure_required_present(&names, std::slice::from_ref(col), "Lagger")?;
+            for period in &self.periods {
+                let generated = format!("{col}_lag_{period}");
+                if !names.contains(&generated) {
+                    names.push(generated);
+                }
+            }
+        }
+        Ok(names)
     }
 }
 

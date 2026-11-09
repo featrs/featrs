@@ -6,7 +6,7 @@
 //! capture morphology, typo tolerance, and sub-word structure.
 
 use crate::traits::FeatureNamesOut;
-use crate::traits::output_names::ensure_fitted;
+use crate::traits::output_names::{ensure_fitted, ensure_required_present};
 use crate::traits::{Error, Fit, Result, Transform};
 use polars::prelude::*;
 use std::borrow::Cow;
@@ -453,8 +453,20 @@ impl Transform<DataFrame> for CharacterNGramVectorizer {
 
 impl FeatureNamesOut for CharacterNGramVectorizer {
     /// One column per learned term, named after the term, in vocabulary order.
-    fn feature_names_out(&self, _input_columns: &[String]) -> Result<Vec<String>> {
+    fn feature_names_out(&self, input_columns: &[String]) -> Result<Vec<String>> {
         ensure_fitted(self.fitted, "CharacterNGramVectorizer")?;
+        let column = self.column.as_ref().ok_or_else(|| {
+            Error::NotFitted(
+                "CharacterNGramVectorizer has not been fitted. \
+                 Call .fit(dataframe) before .feature_names_out()."
+                    .into(),
+            )
+        })?;
+        ensure_required_present(
+            input_columns,
+            std::slice::from_ref(column),
+            "CharacterNGramVectorizer",
+        )?;
         Ok(self.terms.clone())
     }
 }

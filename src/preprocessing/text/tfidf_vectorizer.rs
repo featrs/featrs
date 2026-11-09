@@ -533,7 +533,7 @@ impl Transform<DataFrame> for TFIDFVectorizer {
 
 impl FeatureNamesOut for TFIDFVectorizer {
     /// The inner count vectorizer's terms, in vocabulary order.
-    fn feature_names_out(&self, _input_columns: &[String]) -> Result<Vec<String>> {
+    fn feature_names_out(&self, input_columns: &[String]) -> Result<Vec<String>> {
         ensure_fitted(self.fitted, "TFIDFVectorizer")?;
         let vectorizer = self.count_vectorizer.as_ref().ok_or_else(|| {
             Error::NotFitted(
@@ -542,7 +542,7 @@ impl FeatureNamesOut for TFIDFVectorizer {
                     .into(),
             )
         })?;
-        vectorizer.feature_names_out(&[])
+        vectorizer.feature_names_out(input_columns)
     }
 }
 

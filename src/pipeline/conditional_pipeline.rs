@@ -496,7 +496,7 @@ impl Transform<DataFrame> for ConditionalPipeline {
 
 impl FeatureNamesOut for ConditionalPipeline {
     /// The plan's rule groups in rule order, then the fallback group.
-    fn feature_names_out(&self, _input_columns: &[String]) -> Result<Vec<String>> {
+    fn feature_names_out(&self, input_columns: &[String]) -> Result<Vec<String>> {
         let plan = self.plan.as_ref().ok_or_else(|| {
             Error::NotFitted(
                 "ConditionalPipeline has not been fitted. \
@@ -504,6 +504,24 @@ impl FeatureNamesOut for ConditionalPipeline {
                     .into(),
             )
         })?;
+        for columns in plan.by_rule.iter().flatten() {
+            if !input_columns.contains(columns) {
+                return Err(Error::InvalidInput(format!(
+                    "ConditionalPipeline.feature_names_out: routed column '{columns}' not found \
+                     in the input columns."
+                )));
+            }
+        }
+        if self.fallback.is_some() {
+            for name in &plan.unmatched {
+                if !input_columns.contains(name) {
+                    return Err(Error::InvalidInput(format!(
+                        "ConditionalPipeline.feature_names_out: fallback column '{name}' not \
+                         found in the input columns."
+                    )));
+                }
+            }
+        }
         let mut names = Vec::new();
         for (i, columns) in plan.by_rule.iter().enumerate() {
             if columns.is_empty() {

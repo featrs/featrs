@@ -7,7 +7,9 @@
 //! the pandas `DataFrame.ewm` conventions.
 
 use crate::traits::FeatureNamesOut;
-use crate::traits::output_names::{ensure_fitted, with_generated_names};
+use crate::traits::output_names::{
+    ensure_fitted, ensure_generated_fresh, ensure_required_present, with_generated_names,
+};
 use crate::traits::{Error, Fit, Result, Transform};
 use polars::prelude::*;
 
@@ -409,7 +411,21 @@ impl FeatureNamesOut for ExponentiallyWeightedMovingAverage {
     /// The input columns plus `{column}_ewm_{statistic}_{alpha}`.
     fn feature_names_out(&self, input_columns: &[String]) -> Result<Vec<String>> {
         ensure_fitted(self.fitted, "ExponentiallyWeightedMovingAverage")?;
-        let generated = self.columns.iter().map(|col| self.output_name(col));
+        ensure_required_present(
+            input_columns,
+            &self.columns,
+            "ExponentiallyWeightedMovingAverage",
+        )?;
+        let generated: Vec<String> = self
+            .columns
+            .iter()
+            .map(|col| self.output_name(col))
+            .collect();
+        ensure_generated_fresh(
+            input_columns,
+            &generated,
+            "ExponentiallyWeightedMovingAverage",
+        )?;
         Ok(with_generated_names(input_columns, generated))
     }
 }

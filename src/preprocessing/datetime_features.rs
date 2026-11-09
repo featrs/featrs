@@ -7,7 +7,9 @@
 //! preserved unchanged.
 
 use crate::traits::FeatureNamesOut;
-use crate::traits::output_names::{ensure_fitted, with_generated_names};
+use crate::traits::output_names::{
+    ensure_fitted, ensure_generated_fresh, ensure_required_present, with_generated_names,
+};
 use crate::traits::{Error, Fit, Result, Transform};
 use polars::prelude::*;
 use std::collections::HashSet;
@@ -441,7 +443,13 @@ impl FeatureNamesOut for DatetimeFeatures {
     /// The input columns plus `{column}_{component}` for every planned pair.
     fn feature_names_out(&self, input_columns: &[String]) -> Result<Vec<String>> {
         ensure_fitted(self.fitted, "DatetimeFeatures")?;
-        let generated = self.planned().into_iter().map(|(_, name, _)| name);
+        ensure_required_present(input_columns, &self.columns, "DatetimeFeatures")?;
+        let generated: Vec<String> = self
+            .planned()
+            .into_iter()
+            .map(|(_, name, _)| name)
+            .collect();
+        ensure_generated_fresh(input_columns, &generated, "DatetimeFeatures")?;
         Ok(with_generated_names(input_columns, generated))
     }
 }

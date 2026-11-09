@@ -415,3 +415,143 @@ fn column_transformer_names_include_the_passthrough_remainder() {
     let output = ct.transform(df).unwrap();
     assert_eq!(predicted, names(&output));
 }
+
+#[test]
+fn missing_fitted_columns_are_invalid_input() {
+    let mut scaler = StandardScaler::new();
+    scaler.fit(numeric_df()).unwrap();
+    let err = scaler.feature_names_out(&["a".to_string()]).unwrap_err();
+    assert!(matches!(err, Error::InvalidInput(_)));
+
+    let mut vt = VarianceThreshold::new(0.0);
+    vt.fit(numeric_df()).unwrap();
+    let err = vt.feature_names_out(&["nope".to_string()]).unwrap_err();
+    assert!(matches!(err, Error::InvalidInput(_)));
+
+    let mut lagger = Lagger::new(&["a"], &[1]);
+    lagger.fit(numeric_df()).unwrap();
+    let err = lagger.feature_names_out(&["b".to_string()]).unwrap_err();
+    assert!(matches!(err, Error::InvalidInput(_)));
+
+    let mut target = TargetEncoder::new();
+    target.fit(categorical_df(), y_binary()).unwrap();
+    let err = target.feature_names_out(&["num".to_string()]).unwrap_err();
+    assert!(matches!(err, Error::InvalidInput(_)));
+}
+
+#[test]
+fn generated_name_collisions_are_invalid_input() {
+    let mut dt = DatetimeFeatures::new();
+    dt.fit(date_df()).unwrap();
+    let colliding = vec!["date".to_string(), "date_year".to_string()];
+    let err = dt.feature_names_out(&colliding).unwrap_err();
+    assert!(matches!(err, Error::InvalidInput(_)));
+
+    let frame_df = frame(
+        4,
+        vec![
+            opt_f64_col("a", &[Some(1.0), None, Some(3.0), None]),
+            f64_col("b", &[1.0, 2.0, 3.0, 4.0]),
+        ],
+    );
+    let mut mi = MissingIndicator::new(&["a"]);
+    mi.fit(frame_df).unwrap();
+    let colliding = vec!["a".to_string(), "b".to_string(), "a_missing".to_string()];
+    let err = mi.feature_names_out(&colliding).unwrap_err();
+    assert!(matches!(err, Error::InvalidInput(_)));
+
+    // The same colliding frames are rejected by `transform`.
+    let colliding_df = frame(
+        4,
+        vec![
+            date_col("date", &[19_723, 19_724, 19_725, 19_726]),
+            f64_col("date_year", &[2024.0, 2024.0, 2024.0, 2024.0]),
+        ],
+    );
+    let mut dt = DatetimeFeatures::new();
+    dt.fit(date_df()).unwrap();
+    assert!(matches!(
+        dt.transform(colliding_df),
+        Err(Error::InvalidInput(_))
+    ));
+}
+
+#[test]
+fn leave_one_out_rejects_a_different_column_set() {
+    let mut enc = LeaveOneOutEncoder::new();
+    enc.fit(categorical_df(), y_binary()).unwrap();
+    let err = enc
+        .feature_names_out(&["cat".to_string(), "extra".to_string()])
+        .unwrap_err();
+    assert!(matches!(err, Error::InvalidInput(_)));
+    let err = enc.feature_names_out(&["cat".to_string()]).unwrap_err();
+    assert!(matches!(err, Error::InvalidInput(_)));
+}
+
+#[test]
+fn binary_encoder_rejects_missing_fitted_columns() {
+    let mut enc = BinaryEncoder::new();
+    enc.fit(string_df()).unwrap();
+    let ok = enc.feature_names_out(&names(&string_df())).unwrap();
+    assert!(
+        ok.iter()
+            .all(|n| n.contains("_bit_") || n == "cat" || n == "kind")
+    );
+    let err = enc.feature_names_out(&["cat".to_string()]).unwrap_err();
+    assert!(matches!(err, Error::InvalidInput(_)));
+}
+
+/// A test-only transformer whose schema prediction always fails, so the
+/// composition layers' error handling can be checked.
+struct AlwaysInvalid;
+
+impl Fit<DataFrame> for AlwaysInvalid {
+    type Output = ();
+
+    fn fit(&mut self, _x: DataFrame) -> Result<()> {
+        Ok(())
+    }
+}
+
+impl Transform<DataFrame> for AlwaysInvalid {
+    type Output = DataFrame;
+
+    fn transform(&self, x: DataFrame) -> Result<DataFrame> {
+        Ok(x)
+    }
+}
+
+impl FeatureNamesOut for AlwaysInvalid {
+    fn feature_names_out(&self, _input_columns: &[String]) -> Result<Vec<String>> {
+        Err(Error::InvalidInput("boom".into()))
+    }
+}
+
+#[test]
+fn column_transformer_preserves_child_error_variants() {
+    let df = numeric_df();
+    let mut ct = ColumnTransformer::new(
+        vec![(
+            "bad".into(),
+            Box::new(AlwaysInvalid) as Box<dyn DataFrameTransformer>,
+            vec!["a".into()],
+        )],
+        Remainder::Drop,
+    );
+    ct.fit(df.clone()).unwrap();
+    let err = ct.feature_names_out(&names(&df)).unwrap_err();
+    assert!(
+        matches!(err, Error::InvalidInput(_)),
+        "expected the child's InvalidInput to survive, got: {err:?}"
+    );
+}
+
+#[test]
+fn conditional_pipeline_rejects_missing_routed_columns() {
+    let mut cp = ConditionalPipeline::new()
+        .rule(ColumnPredicate::IsFloat64, Box::new(StandardScaler::new()))
+        .rule(ColumnPredicate::IsString, Box::new(OneHotEncoder::new()));
+    cp.fit(categorical_df()).unwrap();
+    let err = cp.feature_names_out(&["num".to_string()]).unwrap_err();
+    assert!(matches!(err, Error::InvalidInput(_)));
+}

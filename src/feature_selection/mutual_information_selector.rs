@@ -492,11 +492,12 @@ fn estimate_mi(pairs: &[(f64, f64)], n_neighbors: usize) -> f64 {
 
 impl FeatureNamesOut for MutualInformationSelector {
     /// The learned column subset, in selection order.
-    fn feature_names_out(&self, _input_columns: &[String]) -> Result<Vec<String>> {
+    fn feature_names_out(&self, input_columns: &[String]) -> Result<Vec<String>> {
         subset_names(
             self.fitted,
             "MutualInformationSelector",
             self.selected_columns.as_deref(),
+            input_columns,
         )
     }
 }

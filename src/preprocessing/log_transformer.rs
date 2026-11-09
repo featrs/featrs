@@ -25,7 +25,7 @@ use polars::prelude::*;
 
 use crate::traits::FeatureNamesOut;
 use crate::traits::inverse::{HasInverse, InverseTransform};
-use crate::traits::output_names::identity_names;
+use crate::traits::output_names::{ensure_required_present, identity_names};
 use crate::traits::{Error, Fit, Result, Transform};
 use crate::util::{numeric_f64_columns, replace_f64_column};
 
@@ -385,7 +385,9 @@ impl HasInverse for LogTransformer {}
 impl FeatureNamesOut for LogTransformer {
     /// Output names are the input names: `transform` rewrites columns in place.
     fn feature_names_out(&self, input_columns: &[String]) -> Result<Vec<String>> {
-        identity_names(self.fitted, "LogTransformer", input_columns)
+        let names = identity_names(self.fitted, "LogTransformer", input_columns)?;
+        ensure_required_present(input_columns, &self.fitted_columns, "LogTransformer")?;
+        Ok(names)
     }
 }
 

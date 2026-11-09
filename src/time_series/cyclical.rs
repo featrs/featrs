@@ -5,7 +5,7 @@
 //! in the encoded space.
 
 use crate::traits::FeatureNamesOut;
-use crate::traits::output_names::{ensure_fitted, with_generated_names};
+use crate::traits::output_names::{ensure_fitted, ensure_required_present};
 use crate::traits::{Error, Fit, Result, Transform};
 use polars::prelude::*;
 
@@ -173,11 +173,17 @@ impl FeatureNamesOut for CyclicalEncoder {
     /// The input columns plus `{column}_sin` and `{column}_cos` per column.
     fn feature_names_out(&self, input_columns: &[String]) -> Result<Vec<String>> {
         ensure_fitted(self.fitted, "CyclicalEncoder")?;
-        let generated = self
-            .columns
-            .iter()
-            .flat_map(|(col, _)| [format!("{col}_sin"), format!("{col}_cos")]);
-        Ok(with_generated_names(input_columns, generated))
+        // `transform` reads each source from the growing output frame.
+        let mut names = input_columns.to_vec();
+        for (col, _) in &self.columns {
+            ensure_required_present(&names, std::slice::from_ref(col), "CyclicalEncoder")?;
+            for generated in [format!("{col}_sin"), format!("{col}_cos")] {
+                if !names.contains(&generated) {
+                    names.push(generated);
+                }
+            }
+        }
+        Ok(names)
     }
 }
 

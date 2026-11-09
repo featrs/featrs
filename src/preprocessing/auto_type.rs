@@ -444,6 +444,11 @@ impl FeatureNamesOut for AutoTypeDetector {
                     }
                 }
                 ColumnType::Categorical | ColumnType::HighCardinality => {
+                    if !input_columns.contains(name) {
+                        return Err(Error::InvalidInput(format!(
+                            "AutoTypeDetector.feature_names_out: input column '{name}' not found."
+                        )));
+                    }
                     let encoder = encoders
                         .iter()
                         .find(|(n, _)| n == name)

@@ -10,7 +10,9 @@
 use std::collections::HashSet;
 
 use crate::traits::FeatureNamesOut;
-use crate::traits::output_names::{ensure_fitted, with_generated_names};
+use crate::traits::output_names::{
+    ensure_fitted, ensure_generated_fresh, ensure_required_present, with_generated_names,
+};
 use crate::traits::{Error, Fit, Result, Transform};
 use polars::prelude::TimeUnit as PolarsTimeUnit;
 use polars::prelude::*;
@@ -500,10 +502,17 @@ impl FeatureNamesOut for TimeSince {
     /// The input columns plus `{column}_since_{unit}` for every fitted column.
     fn feature_names_out(&self, input_columns: &[String]) -> Result<Vec<String>> {
         ensure_fitted(self.fitted, "TimeSince")?;
-        let generated = self
+        let fitted_columns: Vec<String> = self
             .learned_reference
             .iter()
-            .map(|(col, _)| format!("{col}_since_{}", self.unit.suffix()));
+            .map(|(col, _)| col.clone())
+            .collect();
+        ensure_required_present(input_columns, &fitted_columns, "TimeSince")?;
+        let generated: Vec<String> = fitted_columns
+            .iter()
+            .map(|col| format!("{col}_since_{}", self.unit.suffix()))
+            .collect();
+        ensure_generated_fresh(input_columns, &generated, "TimeSince")?;
         Ok(with_generated_names(input_columns, generated))
     }
 }

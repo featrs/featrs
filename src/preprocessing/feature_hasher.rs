@@ -8,7 +8,7 @@
 //! is zero and collisions do not bias the mean.
 
 use crate::traits::FeatureNamesOut;
-use crate::traits::output_names::ensure_fitted;
+use crate::traits::output_names::{ensure_fitted, ensure_required_present};
 use crate::traits::{Error, Fit, Result, Transform};
 use polars::prelude::*;
 use std::collections::hash_map::DefaultHasher;
@@ -152,8 +152,9 @@ impl Transform<DataFrame> for FeatureHasher {
 
 impl FeatureNamesOut for FeatureHasher {
     /// The hasher rebuilds the frame as `hashed_0 .. hashed_{n-1}`.
-    fn feature_names_out(&self, _input_columns: &[String]) -> Result<Vec<String>> {
+    fn feature_names_out(&self, input_columns: &[String]) -> Result<Vec<String>> {
         ensure_fitted(self.fitted, "FeatureHasher")?;
+        ensure_required_present(input_columns, &self.columns, "FeatureHasher")?;
         Ok((0..self.n_features)
             .map(|idx| format!("hashed_{idx}"))
             .collect())

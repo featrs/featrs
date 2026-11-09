@@ -9,7 +9,7 @@ use polars::prelude::*;
 
 use crate::traits::FeatureNamesOut;
 use crate::traits::inverse::{HasInverse, InverseTransform};
-use crate::traits::output_names::identity_names;
+use crate::traits::output_names::{ensure_required_present, identity_names};
 use crate::traits::schema::{RequiresSchema, SchemaSpec};
 use crate::traits::{Error, Fit, Result, Transform};
 use crate::util::{replace_f64_column, require_f64_columns};
@@ -707,21 +707,36 @@ impl RequiresSchema for RobustScaler {
 impl FeatureNamesOut for StandardScaler {
     /// Output names are the input names: `transform` rewrites columns in place.
     fn feature_names_out(&self, input_columns: &[String]) -> Result<Vec<String>> {
-        identity_names(self.fitted, "StandardScaler", input_columns)
+        let names = identity_names(self.fitted, "StandardScaler", input_columns)?;
+        if let Some(params) = &self.params {
+            let required: Vec<String> = params.iter().map(|p| p.name.clone()).collect();
+            ensure_required_present(input_columns, &required, "StandardScaler")?;
+        }
+        Ok(names)
     }
 }
 
 impl FeatureNamesOut for MinMaxScaler {
     /// Output names are the input names: `transform` rewrites columns in place.
     fn feature_names_out(&self, input_columns: &[String]) -> Result<Vec<String>> {
-        identity_names(self.fitted, "MinMaxScaler", input_columns)
+        let names = identity_names(self.fitted, "MinMaxScaler", input_columns)?;
+        if let Some(params) = &self.params {
+            let required: Vec<String> = params.iter().map(|p| p.name.clone()).collect();
+            ensure_required_present(input_columns, &required, "MinMaxScaler")?;
+        }
+        Ok(names)
     }
 }
 
 impl FeatureNamesOut for RobustScaler {
     /// Output names are the input names: `transform` rewrites columns in place.
     fn feature_names_out(&self, input_columns: &[String]) -> Result<Vec<String>> {
-        identity_names(self.fitted, "RobustScaler", input_columns)
+        let names = identity_names(self.fitted, "RobustScaler", input_columns)?;
+        if let Some(params) = &self.params {
+            let required: Vec<String> = params.iter().map(|p| p.name.clone()).collect();
+            ensure_required_present(input_columns, &required, "RobustScaler")?;
+        }
+        Ok(names)
     }
 }
 

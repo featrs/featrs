@@ -9,9 +9,10 @@
 //!
 //! The trait is implemented by every transformer. Transformers that preserve
 //! their input names return the names they are given, selectors return their
-//! learned subset, and generators append the names they will create. The
-//! result is always the exact column list, in order, that `transform` produces
-//! for a frame with those input columns.
+//! learned subset, and generators report their output names. Generators may
+//! append columns or replace input columns in place. The result is always the
+//! exact column list, in order, that `transform` produces for a frame with
+//! those input columns.
 //!
 //! # Example
 //!
@@ -44,11 +45,17 @@ use crate::traits::{Error, Result};
 /// would be passed to `transform`, in frame order.
 ///
 /// The returned names are exactly the output column names of `transform` for
-/// that input, in output order. Passing a different set of input columns than
-/// the transformer was fitted on is allowed only when the transformer's output
-/// does not depend on them; the result then describes `transform` for that
-/// frame. Selectors and encoders that emit a fixed learned set ignore extra
-/// input names, matching `transform`.
+/// that input, in output order. When `transform` would reject the input — a
+/// missing fitted column, or a generated name that collides with an input
+/// column — `feature_names_out` returns the same [`Error::InvalidInput`]
+/// instead of a schema. Extra input columns are allowed only when `transform`
+/// ignores them, matching `transform` exactly.
+///
+/// The method has a default body returning the input names unchanged, so
+/// existing third-party [`DataFrameTransformer`](crate::pipeline::DataFrameTransformer)
+/// implementations keep compiling when this trait grows new requirements.
+/// Transformers whose `transform` drops, renames, or generates columns must
+/// override it.
 pub trait FeatureNamesOut {
     /// Returns the output column names that `transform` will produce for a
     /// frame whose columns are `input_columns`, in output order.
@@ -59,7 +66,9 @@ pub trait FeatureNamesOut {
     /// Returns [`Error::InvalidInput`] when the transformer cannot describe an
     /// output for this input (for example a single-column encoder given an
     /// empty input).
-    fn feature_names_out(&self, input_columns: &[String]) -> Result<Vec<String>>;
+    fn feature_names_out(&self, input_columns: &[String]) -> Result<Vec<String>> {
+        Ok(input_columns.to_vec())
+    }
 }
 
 /// Return [`Error::NotFitted`] unless `fitted` is `true`.
@@ -84,17 +93,69 @@ pub(crate) fn identity_names(
 }
 
 /// The learned column subset a select-based transformer emits.
+///
+/// Every learned column must be present in `input_columns`; extra input
+/// columns are allowed and ignored, matching `transform`.
 pub(crate) fn subset_names(
     fitted: bool,
     who: &str,
     learned: Option<&[String]>,
+    input_columns: &[String],
 ) -> Result<Vec<String>> {
     ensure_fitted(fitted, who)?;
-    learned.map(<[String]>::to_vec).ok_or_else(|| {
+    let learned = learned.ok_or_else(|| {
         Error::NotFitted(format!(
             "{who} has not been fitted. Call .fit(dataframe) before .feature_names_out()."
         ))
-    })
+    })?;
+    ensure_required_present(input_columns, learned, who)?;
+    Ok(learned.to_vec())
+}
+
+/// Require every column in `required` to be present in `input_columns`.
+///
+/// Mirrors the missing-column guard in `transform`: a schema prediction for
+/// a frame that `transform` would reject is an [`Error::InvalidInput`],
+/// not a schema. Extra input columns are allowed.
+pub(crate) fn ensure_required_present(
+    input_columns: &[String],
+    required: &[String],
+    who: &str,
+) -> Result<()> {
+    for name in required {
+        if !input_columns.contains(name) {
+            return Err(Error::InvalidInput(format!(
+                "{who}.feature_names_out: column '{name}' not found in the input columns."
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Reject generated names that collide with an input column or with an
+/// earlier generated name.
+///
+/// Mirrors the collision guard in `transform` for generators that return
+/// [`Error::InvalidInput`] instead of overwriting: a schema prediction for
+/// a frame that `transform` would reject is an error, not a schema. Call
+/// this before [`with_generated_names`]; after it passes, the append cannot
+/// collide.
+pub(crate) fn ensure_generated_fresh(
+    input_columns: &[String],
+    generated: &[String],
+    who: &str,
+) -> Result<()> {
+    let mut seen: std::collections::HashSet<&str> =
+        input_columns.iter().map(|s| s.as_str()).collect();
+    for name in generated {
+        if !seen.insert(name.as_str()) {
+            return Err(Error::InvalidInput(format!(
+                "{who}.feature_names_out: generated column '{name}' collides with an input \
+                 column or another generated column."
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Append generated names the way `DataFrame::with_column` applies them: a
@@ -144,6 +205,37 @@ mod tests {
         let input = vec!["a".to_string(), "b".to_string()];
         let names = with_generated_names(&input, ["a_lag_1".to_string(), "b".to_string()]);
         assert_eq!(names, vec!["a", "b", "a_lag_1"]);
+    }
+
+    #[test]
+    fn subset_names_rejects_missing_selected() {
+        let learned = vec!["a".to_string()];
+        let err = subset_names(true, "Test", Some(&learned), &["b".to_string()]).unwrap_err();
+        assert!(matches!(err, Error::InvalidInput(_)));
+        let names = subset_names(
+            true,
+            "Test",
+            Some(&learned),
+            &["b".to_string(), "a".to_string()],
+        )
+        .unwrap();
+        assert_eq!(names, vec!["a".to_string()]);
+    }
+
+    #[test]
+    fn ensure_generated_fresh_rejects_input_and_internal_collisions() {
+        let input = vec!["a".to_string()];
+        assert!(matches!(
+            ensure_generated_fresh(&input, &["a_lag_1".to_string(), "a".to_string()], "Test"),
+            Err(Error::InvalidInput(_))
+        ));
+        assert!(matches!(
+            ensure_generated_fresh(&input, &["x".to_string(), "x".to_string()], "Test"),
+            Err(Error::InvalidInput(_))
+        ));
+        assert!(
+            ensure_generated_fresh(&input, &["x".to_string(), "y".to_string()], "Test").is_ok()
+        );
     }
 
     #[test]

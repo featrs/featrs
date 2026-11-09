@@ -53,7 +53,9 @@ use std::collections::HashSet;
 use polars::prelude::*;
 
 use crate::traits::FeatureNamesOut;
-use crate::traits::output_names::{ensure_fitted, with_generated_names};
+use crate::traits::output_names::{
+    ensure_fitted, ensure_generated_fresh, ensure_required_present, with_generated_names,
+};
 use crate::traits::{Error, Fit, Result, Transform};
 use crate::util::{require_f64_columns, series_div};
 
@@ -332,6 +334,7 @@ impl FeatureNamesOut for RatioFeatures {
     /// The input columns plus each generated `_div_` ratio, in pair order.
     fn feature_names_out(&self, input_columns: &[String]) -> Result<Vec<String>> {
         ensure_fitted(self.fitted, "RatioFeatures")?;
+        ensure_required_present(input_columns, &self.fitted_columns, "RatioFeatures")?;
         let n = self.fitted_columns.len();
         let mut generated = Vec::new();
         for i in 0..n {
@@ -348,6 +351,7 @@ impl FeatureNamesOut for RatioFeatures {
                 }
             }
         }
+        ensure_generated_fresh(input_columns, &generated, "RatioFeatures")?;
         Ok(with_generated_names(input_columns, generated))
     }
 }

@@ -177,11 +177,12 @@ impl Transform<DataFrame> for ConstantColumnRemover {
 
 impl FeatureNamesOut for ConstantColumnRemover {
     /// The columns that survived the last fit, in frame order.
-    fn feature_names_out(&self, _input_columns: &[String]) -> Result<Vec<String>> {
+    fn feature_names_out(&self, input_columns: &[String]) -> Result<Vec<String>> {
         subset_names(
             self.fitted,
             "ConstantColumnRemover",
             self.selected_columns.as_deref(),
+            input_columns,
         )
     }
 }

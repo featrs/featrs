@@ -99,6 +99,18 @@ impl ColumnTransformer {
     }
 }
 
+fn wrap_child_error(e: Error, t_name: &str) -> Error {
+    let msg = format!(
+        "ColumnTransformer: transformer '{}' failed during feature_names_out: {}",
+        t_name, e
+    );
+    match e {
+        Error::NotFitted(_) => Error::NotFitted(msg),
+        Error::InvalidInput(_) => Error::InvalidInput(msg),
+        Error::Computation(_) => Error::Computation(msg),
+    }
+}
+
 impl Fit<DataFrame> for ColumnTransformer {
     type Output = ();
 
@@ -283,13 +295,11 @@ impl FeatureNamesOut for ColumnTransformer {
                     )));
                 }
             }
-            names.extend(transformer.feature_names_out(columns).map_err(|e| {
-                Error::Computation(format!(
-                    "ColumnTransformer: transformer '{}' failed during \
-                             feature_names_out: {}",
-                    t_name, e
-                ))
-            })?);
+            names.extend(
+                transformer
+                    .feature_names_out(columns)
+                    .map_err(|e| wrap_child_error(e, t_name))?,
+            );
         }
         if matches!(self.remainder, Remainder::Passthrough) {
             for name in input_columns {

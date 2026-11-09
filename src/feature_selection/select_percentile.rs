@@ -208,11 +208,12 @@ impl Transform<DataFrame> for SelectPercentile {
 
 impl FeatureNamesOut for SelectPercentile {
     /// The learned column subset, in selection order.
-    fn feature_names_out(&self, _input_columns: &[String]) -> Result<Vec<String>> {
+    fn feature_names_out(&self, input_columns: &[String]) -> Result<Vec<String>> {
         subset_names(
             self.fitted,
             "SelectPercentile",
             self.selected_columns.as_deref(),
+            input_columns,
         )
     }
 }

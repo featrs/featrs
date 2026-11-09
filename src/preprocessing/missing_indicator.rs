@@ -12,7 +12,9 @@
 use std::collections::HashSet;
 
 use crate::traits::FeatureNamesOut;
-use crate::traits::output_names::{ensure_fitted, with_generated_names};
+use crate::traits::output_names::{
+    ensure_fitted, ensure_generated_fresh, ensure_required_present, with_generated_names,
+};
 use crate::traits::{Error, Fit, Result, Transform};
 use polars::prelude::*;
 
@@ -168,7 +170,13 @@ impl FeatureNamesOut for MissingIndicator {
     /// The input columns plus `{column}_missing` for every fitted column.
     fn feature_names_out(&self, input_columns: &[String]) -> Result<Vec<String>> {
         ensure_fitted(self.fitted, "MissingIndicator")?;
-        let generated = self.columns.iter().map(|col| format!("{col}_missing"));
+        ensure_required_present(input_columns, &self.columns, "MissingIndicator")?;
+        let generated: Vec<String> = self
+            .columns
+            .iter()
+            .map(|col| format!("{col}_missing"))
+            .collect();
+        ensure_generated_fresh(input_columns, &generated, "MissingIndicator")?;
         Ok(with_generated_names(input_columns, generated))
     }
 }

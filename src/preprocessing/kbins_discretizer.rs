@@ -17,7 +17,7 @@
 
 use crate::preprocessing::scaler::percentile_sorted;
 use crate::traits::FeatureNamesOut;
-use crate::traits::output_names::ensure_fitted;
+use crate::traits::output_names::{ensure_fitted, ensure_required_present};
 use crate::traits::{Error, Fit, Result, Transform};
 use crate::util::{replace_f64_column, require_f64_columns};
 use polars::prelude::*;
@@ -532,7 +532,13 @@ impl FeatureNamesOut for KBinsDiscretizer {
             )
         })?;
         match self.encode {
-            EncodeMode::Ordinal => Ok(input_columns.to_vec()),
+            EncodeMode::Ordinal => {
+                // Ordinal `transform` rewrites each fitted column in place and
+                // errors when one is missing.
+                let required: Vec<String> = bins.iter().map(|b| b.column.clone()).collect();
+                ensure_required_present(input_columns, &required, "KBinsDiscretizer")?;
+                Ok(input_columns.to_vec())
+            }
             EncodeMode::OneHot | EncodeMode::OneHotDropFirst => {
                 let by_name: HashMap<&str, &BinEdges> =
                     bins.iter().map(|b| (b.column.as_str(), b)).collect();

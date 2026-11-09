@@ -11,7 +11,7 @@ use polars::prelude::*;
 
 use crate::preprocessing::scaler::percentile_sorted;
 use crate::traits::FeatureNamesOut;
-use crate::traits::output_names::identity_names;
+use crate::traits::output_names::{ensure_required_present, identity_names};
 use crate::traits::{Error, Fit, Result, Transform};
 use crate::util::{replace_f64_column, require_f64_columns};
 
@@ -338,7 +338,12 @@ impl Transform<DataFrame> for OutlierClipper {
 impl FeatureNamesOut for OutlierClipper {
     /// Output names are the input names: `transform` rewrites columns in place.
     fn feature_names_out(&self, input_columns: &[String]) -> Result<Vec<String>> {
-        identity_names(self.fitted, "OutlierClipper", input_columns)
+        let names = identity_names(self.fitted, "OutlierClipper", input_columns)?;
+        if let Some(bounds) = &self.bounds {
+            let required: Vec<String> = bounds.iter().map(|b| b.name.clone()).collect();
+            ensure_required_present(input_columns, &required, "OutlierClipper")?;
+        }
+        Ok(names)
     }
 }
 

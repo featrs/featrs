@@ -7,7 +7,7 @@
 //! is rejected like an all-null one.
 
 use crate::traits::FeatureNamesOut;
-use crate::traits::output_names::identity_names;
+use crate::traits::output_names::{ensure_required_present, identity_names};
 use crate::traits::{Error, Fit, Result, Transform};
 use polars::prelude::*;
 use std::collections::HashMap;
@@ -251,7 +251,12 @@ impl Transform<DataFrame> for SimpleImputer {
 impl FeatureNamesOut for SimpleImputer {
     /// Output names are the input names: `transform` rewrites columns in place.
     fn feature_names_out(&self, input_columns: &[String]) -> Result<Vec<String>> {
-        identity_names(self.fitted, "SimpleImputer", input_columns)
+        let names = identity_names(self.fitted, "SimpleImputer", input_columns)?;
+        if let Some(fill_values) = &self.fill_values {
+            let required: Vec<String> = fill_values.keys().cloned().collect();
+            ensure_required_present(input_columns, &required, "SimpleImputer")?;
+        }
+        Ok(names)
     }
 }
 
