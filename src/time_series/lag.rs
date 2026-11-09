@@ -3,6 +3,8 @@
 //! [`Lagger`] creates shifted copies of columns for use as features
 //! in forecasting models. Analogous to `df.shift()` in pandas.
 
+use crate::traits::FeatureNamesOut;
+use crate::traits::output_names::{ensure_fitted, with_generated_names};
 use crate::traits::{Error, Fit, Result, Transform};
 use polars::prelude::*;
 use std::collections::HashSet;
@@ -117,6 +119,19 @@ impl Transform<DataFrame> for Lagger {
         }
 
         Ok(out)
+    }
+}
+
+impl FeatureNamesOut for Lagger {
+    /// The input columns plus `{column}_lag_{period}`, in configuration order.
+    fn feature_names_out(&self, input_columns: &[String]) -> Result<Vec<String>> {
+        ensure_fitted(self.fitted, "Lagger")?;
+        let generated = self.columns.iter().flat_map(|col| {
+            self.periods
+                .iter()
+                .map(move |period| format!("{col}_lag_{period}"))
+        });
+        Ok(with_generated_names(input_columns, generated))
     }
 }
 

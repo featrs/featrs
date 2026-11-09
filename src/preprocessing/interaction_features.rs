@@ -36,6 +36,8 @@
 
 use std::collections::HashSet;
 
+use crate::traits::FeatureNamesOut;
+use crate::traits::output_names::{ensure_fitted, with_generated_names};
 use crate::traits::{Error, Fit, Result, Transform};
 use crate::util::{numeric_f64_columns, series_mul};
 use polars::prelude::*;
@@ -317,6 +319,24 @@ impl Transform<DataFrame> for InteractionFeatures {
         }
 
         Ok(out)
+    }
+}
+
+impl FeatureNamesOut for InteractionFeatures {
+    /// The input columns plus each generated `_x_` interaction, in pair order.
+    fn feature_names_out(&self, input_columns: &[String]) -> Result<Vec<String>> {
+        ensure_fitted(self.fitted, "InteractionFeatures")?;
+        let n = self.fitted_columns.len();
+        let generated = (0..n).flat_map(|i| {
+            let start = if self.include_self_products { i } else { i + 1 };
+            (start..n).map(move |j| {
+                format!(
+                    "{}{}{}",
+                    self.fitted_columns[i], NAME_SEP, self.fitted_columns[j]
+                )
+            })
+        });
+        Ok(with_generated_names(input_columns, generated))
     }
 }
 

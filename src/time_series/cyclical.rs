@@ -4,6 +4,8 @@
 //! to `sin` and `cos` components so that `23:00` and `01:00` are close
 //! in the encoded space.
 
+use crate::traits::FeatureNamesOut;
+use crate::traits::output_names::{ensure_fitted, with_generated_names};
 use crate::traits::{Error, Fit, Result, Transform};
 use polars::prelude::*;
 
@@ -164,6 +166,18 @@ impl Transform<DataFrame> for CyclicalEncoder {
         }
 
         Ok(out)
+    }
+}
+
+impl FeatureNamesOut for CyclicalEncoder {
+    /// The input columns plus `{column}_sin` and `{column}_cos` per column.
+    fn feature_names_out(&self, input_columns: &[String]) -> Result<Vec<String>> {
+        ensure_fitted(self.fitted, "CyclicalEncoder")?;
+        let generated = self
+            .columns
+            .iter()
+            .flat_map(|(col, _)| [format!("{col}_sin"), format!("{col}_cos")]);
+        Ok(with_generated_names(input_columns, generated))
     }
 }
 

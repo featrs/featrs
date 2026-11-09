@@ -3,6 +3,8 @@
 //! [`RollingAggregator`] computes rolling mean, std, min, max, sum
 //! over a fixed window. Analogous to `df.rolling()` in pandas.
 
+use crate::traits::FeatureNamesOut;
+use crate::traits::output_names::{ensure_fitted, with_generated_names};
 use crate::traits::{Error, Fit, Result, Transform};
 use polars::prelude::*;
 
@@ -185,6 +187,25 @@ impl Transform<DataFrame> for RollingAggregator {
         }
 
         Ok(out)
+    }
+}
+
+impl FeatureNamesOut for RollingAggregator {
+    /// The input columns plus `{column}_{function}_{window}`.
+    fn feature_names_out(&self, input_columns: &[String]) -> Result<Vec<String>> {
+        ensure_fitted(self.fitted, "RollingAggregator")?;
+        let fn_name = match self.function {
+            RollingFn::Mean => "mean",
+            RollingFn::Std => "std",
+            RollingFn::Min => "min",
+            RollingFn::Max => "max",
+            RollingFn::Sum => "sum",
+        };
+        let generated = self
+            .columns
+            .iter()
+            .map(|col| format!("{col}_{fn_name}_{}", self.window_size));
+        Ok(with_generated_names(input_columns, generated))
     }
 }
 

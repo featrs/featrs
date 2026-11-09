@@ -16,6 +16,8 @@
 //! column rather than sizing by `n_bins`.
 
 use crate::preprocessing::scaler::percentile_sorted;
+use crate::traits::FeatureNamesOut;
+use crate::traits::output_names::ensure_fitted;
 use crate::traits::{Error, Fit, Result, Transform};
 use crate::util::{replace_f64_column, require_f64_columns};
 use polars::prelude::*;
@@ -512,6 +514,41 @@ impl Transform<DataFrame> for KBinsDiscretizer {
                 }
 
                 DataFrame::new(x.height(), out_cols).map_err(|e| Error::Computation(e.to_string()))
+            }
+        }
+    }
+}
+
+impl FeatureNamesOut for KBinsDiscretizer {
+    /// Ordinal mode keeps the input names; one-hot modes replace each fitted
+    /// column in place with `{column}_bin_{j}` and pass the rest through.
+    fn feature_names_out(&self, input_columns: &[String]) -> Result<Vec<String>> {
+        ensure_fitted(self.fitted, "KBinsDiscretizer")?;
+        let bins = self.bin_edges.as_ref().ok_or_else(|| {
+            Error::NotFitted(
+                "KBinsDiscretizer has not been fitted. \
+                 Call .fit(dataframe) before .feature_names_out()."
+                    .into(),
+            )
+        })?;
+        match self.encode {
+            EncodeMode::Ordinal => Ok(input_columns.to_vec()),
+            EncodeMode::OneHot | EncodeMode::OneHotDropFirst => {
+                let by_name: HashMap<&str, &BinEdges> =
+                    bins.iter().map(|b| (b.column.as_str(), b)).collect();
+                let start = usize::from(self.encode == EncodeMode::OneHotDropFirst);
+                let mut out = Vec::with_capacity(input_columns.len());
+                for name in input_columns {
+                    match by_name.get(name.as_str()) {
+                        Some(be) => {
+                            for j in start..be.edges.len() - 1 {
+                                out.push(format!("{name}_bin_{j}"));
+                            }
+                        }
+                        None => out.push(name.clone()),
+                    }
+                }
+                Ok(out)
             }
         }
     }

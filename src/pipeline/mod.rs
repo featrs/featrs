@@ -19,7 +19,7 @@ pub use column_transformer::ColumnTransformer;
 pub use conditional_pipeline::ConditionalPipeline;
 pub use feature_union::FeatureUnion;
 
-use crate::traits::{Error, Fit, Result, Transform};
+use crate::traits::{Error, FeatureNamesOut, Fit, Result, Transform};
 use polars::prelude::*;
 
 /// Trait alias for [`Box<dyn ...>`](Box) type erasure in [`Pipeline`],
@@ -28,12 +28,14 @@ use polars::prelude::*;
 /// Automatically implemented for any type that satisfies both
 /// [`Fit<DataFrame, Output = ()>`](crate::traits::Fit) and
 /// [`Transform<DataFrame, Output = DataFrame>`](crate::traits::Transform).
+/// [`FeatureNamesOut`] is a supertrait, so every pipeline step can also report
+/// its output schema before transforming data.
 pub trait DataFrameTransformer:
-    Fit<DataFrame, Output = ()> + Transform<DataFrame, Output = DataFrame>
+    Fit<DataFrame, Output = ()> + Transform<DataFrame, Output = DataFrame> + FeatureNamesOut
 {
 }
 impl<T> DataFrameTransformer for T where
-    T: Fit<DataFrame, Output = ()> + Transform<DataFrame, Output = DataFrame>
+    T: Fit<DataFrame, Output = ()> + Transform<DataFrame, Output = DataFrame> + FeatureNamesOut
 {
 }
 
@@ -174,6 +176,26 @@ impl Transform<DataFrame> for Pipeline {
                 .map_err(|e| wrap_step_error(e, i, name, "transform"))?;
         }
         Ok(x_curr)
+    }
+}
+
+impl FeatureNamesOut for Pipeline {
+    /// Thread the input names through every step's output plan, in order.
+    fn feature_names_out(&self, input_columns: &[String]) -> Result<Vec<String>> {
+        if !self.fitted {
+            return Err(Error::NotFitted(
+                "Pipeline has not been fitted. \
+                 Call .fit(dataframe) before .feature_names_out()."
+                    .into(),
+            ));
+        }
+        let mut names = input_columns.to_vec();
+        for (i, (name, transformer)) in self.steps.iter().enumerate() {
+            names = transformer
+                .feature_names_out(&names)
+                .map_err(|e| wrap_step_error(e, i, name, "feature_names_out"))?;
+        }
+        Ok(names)
     }
 }
 

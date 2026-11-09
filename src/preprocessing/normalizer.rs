@@ -3,6 +3,8 @@
 //! [`Normalizer`] scales each row (sample) to unit norm independently.
 //! Supports L1, L2, and Max norms. Analogous to `sklearn.preprocessing.Normalizer`.
 
+use crate::traits::FeatureNamesOut;
+use crate::traits::output_names::identity_names;
 use crate::traits::{Error, Fit, Result, Transform};
 use polars::prelude::*;
 
@@ -182,6 +184,13 @@ impl Transform<DataFrame> for Normalizer {
         }
 
         DataFrame::new(n_rows, out_cols).map_err(|e| Error::Computation(e.to_string()))
+    }
+}
+
+impl FeatureNamesOut for Normalizer {
+    /// Output names are the input names: `transform` rewrites columns in place.
+    fn feature_names_out(&self, input_columns: &[String]) -> Result<Vec<String>> {
+        identity_names(self.fitted, "Normalizer", input_columns)
     }
 }
 

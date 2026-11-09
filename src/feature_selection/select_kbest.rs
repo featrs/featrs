@@ -4,6 +4,8 @@
 //! (ANOVA F-value between each feature and a classification target) and
 //! [`FRegression`] (F-value for the linear relation to a continuous target).
 
+use crate::traits::FeatureNamesOut;
+use crate::traits::output_names::subset_names;
 use crate::traits::{Error, FitSupervised, Result, Transform};
 use polars::prelude::*;
 
@@ -515,6 +517,13 @@ impl Transform<DataFrame> for SelectKBest {
         let refs: Vec<&str> = cols.iter().map(|s| s.as_str()).collect();
         x.select(refs)
             .map_err(|e| Error::Computation(e.to_string()))
+    }
+}
+
+impl FeatureNamesOut for SelectKBest {
+    /// The learned column subset, in selection order.
+    fn feature_names_out(&self, _input_columns: &[String]) -> Result<Vec<String>> {
+        subset_names(self.fitted, "SelectKBest", self.selected_columns.as_deref())
     }
 }
 

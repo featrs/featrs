@@ -6,6 +6,8 @@
 //! linear ones. It is the equivalent of scikit-learn's `mutual_info_classif` /
 //! `mutual_info_regression` used with `SelectKBest`.
 
+use crate::traits::FeatureNamesOut;
+use crate::traits::output_names::subset_names;
 use crate::traits::{Error, FitSupervised, Result, Transform};
 use crate::util::require_f64_columns;
 use polars::prelude::*;
@@ -486,6 +488,17 @@ fn estimate_mi(pairs: &[(f64, f64)], n_neighbors: usize) -> f64 {
     }
 
     digamma(k as f64) + digamma(n as f64) - marginal_sum / n as f64
+}
+
+impl FeatureNamesOut for MutualInformationSelector {
+    /// The learned column subset, in selection order.
+    fn feature_names_out(&self, _input_columns: &[String]) -> Result<Vec<String>> {
+        subset_names(
+            self.fitted,
+            "MutualInformationSelector",
+            self.selected_columns.as_deref(),
+        )
+    }
 }
 
 #[cfg(test)]

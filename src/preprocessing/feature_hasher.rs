@@ -7,6 +7,8 @@
 //! (`+1.0` / `-1.0`) of each addition, so the expected value of every bucket
 //! is zero and collisions do not bias the mean.
 
+use crate::traits::FeatureNamesOut;
+use crate::traits::output_names::ensure_fitted;
 use crate::traits::{Error, Fit, Result, Transform};
 use polars::prelude::*;
 use std::collections::hash_map::DefaultHasher;
@@ -145,6 +147,16 @@ impl Transform<DataFrame> for FeatureHasher {
         }
 
         DataFrame::new(n_rows, out_cols).map_err(|e| Error::Computation(e.to_string()))
+    }
+}
+
+impl FeatureNamesOut for FeatureHasher {
+    /// The hasher rebuilds the frame as `hashed_0 .. hashed_{n-1}`.
+    fn feature_names_out(&self, _input_columns: &[String]) -> Result<Vec<String>> {
+        ensure_fitted(self.fitted, "FeatureHasher")?;
+        Ok((0..self.n_features)
+            .map(|idx| format!("hashed_{idx}"))
+            .collect())
     }
 }
 

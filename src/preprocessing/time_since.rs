@@ -9,6 +9,8 @@
 
 use std::collections::HashSet;
 
+use crate::traits::FeatureNamesOut;
+use crate::traits::output_names::{ensure_fitted, with_generated_names};
 use crate::traits::{Error, Fit, Result, Transform};
 use polars::prelude::TimeUnit as PolarsTimeUnit;
 use polars::prelude::*;
@@ -491,6 +493,18 @@ impl Transform<DataFrame> for TimeSince {
         }
 
         Ok(out)
+    }
+}
+
+impl FeatureNamesOut for TimeSince {
+    /// The input columns plus `{column}_since_{unit}` for every fitted column.
+    fn feature_names_out(&self, input_columns: &[String]) -> Result<Vec<String>> {
+        ensure_fitted(self.fitted, "TimeSince")?;
+        let generated = self
+            .learned_reference
+            .iter()
+            .map(|(col, _)| format!("{col}_since_{}", self.unit.suffix()));
+        Ok(with_generated_names(input_columns, generated))
     }
 }
 

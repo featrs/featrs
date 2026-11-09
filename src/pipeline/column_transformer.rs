@@ -6,6 +6,8 @@
 
 use crate::pipeline::DataFrameTransformer;
 use crate::pipeline::ensure_non_empty_rows;
+use crate::traits::FeatureNamesOut;
+use crate::traits::output_names::{ensure_fitted, ensure_unique_names};
 use crate::traits::{Error, Fit, Result, Transform};
 use polars::prelude::*;
 use std::collections::{HashMap, HashSet};
@@ -261,6 +263,51 @@ impl Transform<DataFrame> for ColumnTransformer {
         }
 
         Ok(result)
+    }
+}
+
+impl FeatureNamesOut for ColumnTransformer {
+    /// Each child's plan for its configured columns, then the passthrough
+    /// remainder in input order (when the remainder is `Passthrough`).
+    fn feature_names_out(&self, input_columns: &[String]) -> Result<Vec<String>> {
+        ensure_fitted(self.fitted, "ColumnTransformer")?;
+        let specified = self.all_specified_columns();
+        let mut names = Vec::new();
+        for (t_name, transformer, columns) in &self.transformers {
+            for column in columns {
+                if !input_columns.contains(column) {
+                    return Err(Error::InvalidInput(format!(
+                        "ColumnTransformer: transformer '{}' requests column '{}', which is \
+                         not present in the input columns.",
+                        t_name, column
+                    )));
+                }
+            }
+            names.extend(transformer.feature_names_out(columns).map_err(|e| {
+                Error::Computation(format!(
+                    "ColumnTransformer: transformer '{}' failed during \
+                             feature_names_out: {}",
+                    t_name, e
+                ))
+            })?);
+        }
+        if matches!(self.remainder, Remainder::Passthrough) {
+            for name in input_columns {
+                if !specified.contains(name.as_str()) {
+                    names.push(name.clone());
+                }
+            }
+        }
+        if names.is_empty() {
+            return Err(Error::InvalidInput(
+                "ColumnTransformer produced no output columns. \
+                 Check that at least one transformer has matching input columns \
+                 or use Remainder::Passthrough to keep unspecified columns."
+                    .into(),
+            ));
+        }
+        ensure_unique_names(&names, "ColumnTransformer")?;
+        Ok(names)
     }
 }
 

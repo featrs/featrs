@@ -6,6 +6,8 @@
 //! `timestamp_hour`, `timestamp_is_weekend`. The original columns are
 //! preserved unchanged.
 
+use crate::traits::FeatureNamesOut;
+use crate::traits::output_names::{ensure_fitted, with_generated_names};
 use crate::traits::{Error, Fit, Result, Transform};
 use polars::prelude::*;
 use std::collections::HashSet;
@@ -433,6 +435,15 @@ fn extract_component(s: &Series, comp: DatetimeComponent, col: &str) -> Result<S
         }
     };
     Ok(result)
+}
+
+impl FeatureNamesOut for DatetimeFeatures {
+    /// The input columns plus `{column}_{component}` for every planned pair.
+    fn feature_names_out(&self, input_columns: &[String]) -> Result<Vec<String>> {
+        ensure_fitted(self.fitted, "DatetimeFeatures")?;
+        let generated = self.planned().into_iter().map(|(_, name, _)| name);
+        Ok(with_generated_names(input_columns, generated))
+    }
 }
 
 #[cfg(test)]

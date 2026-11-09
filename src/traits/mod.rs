@@ -17,6 +17,11 @@
 //! [`inverse::InverseTransform`] to map output features back to the input
 //! domain, and advertise that capability through [`inverse::HasInverse`].
 //!
+//! Output schemas live in [`output_names`]: every transformer implements
+//! [`output_names::FeatureNamesOut`] to report the column names its
+//! `transform` emits without materialising data, which is the output-side
+//! counterpart to the input requirements in [`schema`].
+//!
 //! Unsupervised transformers (scalers, encoders, imputers, …) implement
 //! [`Fit`]; the few supervised ones (e.g. `SelectKBest`) implement
 //! [`FitSupervised`] instead. This mirrors scikit-learn's split between
@@ -34,9 +39,11 @@
 use thiserror::Error;
 
 pub mod inverse;
+pub mod output_names;
 pub mod schema;
 
 pub use inverse::{HasInverse, InverseTransform};
+pub use output_names::FeatureNamesOut;
 pub use schema::{
     ColumnRequirement, RequiresSchema, SchemaSpec, SchemaViolation, check_schema, validate_schema,
 };

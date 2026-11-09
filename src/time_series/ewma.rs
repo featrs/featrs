@@ -6,6 +6,8 @@
 //! `half_life`) and the `adjust`, `min_periods`, and `ignore_na` flags follow
 //! the pandas `DataFrame.ewm` conventions.
 
+use crate::traits::FeatureNamesOut;
+use crate::traits::output_names::{ensure_fitted, with_generated_names};
 use crate::traits::{Error, Fit, Result, Transform};
 use polars::prelude::*;
 
@@ -400,6 +402,15 @@ impl Transform<DataFrame> for ExponentiallyWeightedMovingAverage {
         }
 
         Ok(out)
+    }
+}
+
+impl FeatureNamesOut for ExponentiallyWeightedMovingAverage {
+    /// The input columns plus `{column}_ewm_{statistic}_{alpha}`.
+    fn feature_names_out(&self, input_columns: &[String]) -> Result<Vec<String>> {
+        ensure_fitted(self.fitted, "ExponentiallyWeightedMovingAverage")?;
+        let generated = self.columns.iter().map(|col| self.output_name(col));
+        Ok(with_generated_names(input_columns, generated))
     }
 }
 

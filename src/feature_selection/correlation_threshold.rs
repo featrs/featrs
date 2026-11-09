@@ -5,6 +5,8 @@
 //! columns above a configurable threshold, only the first (in input order) is
 //! kept, reducing multicollinearity and redundant features.
 
+use crate::traits::FeatureNamesOut;
+use crate::traits::output_names::subset_names;
 use crate::traits::{Error, Fit, Result, Transform};
 use crate::util::require_f64_columns;
 use polars::prelude::*;
@@ -319,6 +321,17 @@ fn ranks_of(values: &[f64]) -> Vec<f64> {
         i = j + 1;
     }
     out
+}
+
+impl FeatureNamesOut for CorrelationThreshold {
+    /// The learned column subset, in selection order.
+    fn feature_names_out(&self, _input_columns: &[String]) -> Result<Vec<String>> {
+        subset_names(
+            self.fitted,
+            "CorrelationThreshold",
+            self.selected_columns.as_deref(),
+        )
+    }
 }
 
 #[cfg(test)]

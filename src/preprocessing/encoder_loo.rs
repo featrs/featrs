@@ -8,6 +8,8 @@
 //! target value prevents target leakage into the training features, which
 //! dramatically reduces overfitting compared to plain target encoding.
 
+use crate::traits::FeatureNamesOut;
+use crate::traits::output_names::identity_names;
 use crate::traits::{Error, FitSupervised, Result, Transform};
 use polars::prelude::*;
 use std::collections::HashMap;
@@ -550,6 +552,13 @@ impl Transform<DataFrame> for LeaveOneOutEncoder {
             })?;
         }
         Ok(out)
+    }
+}
+
+impl FeatureNamesOut for LeaveOneOutEncoder {
+    /// Output names are the input names: `transform` rewrites columns in place.
+    fn feature_names_out(&self, input_columns: &[String]) -> Result<Vec<String>> {
+        identity_names(self.fitted, "LeaveOneOutEncoder", input_columns)
     }
 }
 

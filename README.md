@@ -85,6 +85,7 @@ let scaled = scaler.transform(data)?;
 | | `MutualInformationSelector` | Rank/select top-k features by mutual information with the target |
 | **Auto** | `AutoTypeDetector` | Auto-detect column types (incl. numeric-string columns) and apply default transforms |
 | **Schema** | `SchemaSpec` / `validate_schema` | Describe a transformer's required input columns and dtypes, check a frame before transforming, and report every mismatch in one error |
+| **Output schema** | `FeatureNamesOut` | Report the exact output column names, in order, that a fitted transformer's `transform` emits — without materialising data. Implemented by every transformer and threaded through `Pipeline`, `ColumnTransformer`, `FeatureUnion`, `ConditionalPipeline`, and `CachedPipeline` |
 | **Diagnostics** | `DataQualityReport` | Summarise nulls, per-column stats and outliers, cardinality, duplicate rows/columns, constant columns, and the preprocessing it recommends |
 
 ## Examples

@@ -5,6 +5,8 @@
 //! them.
 
 use crate::feature_selection::select_kbest::{FClassif, ScoreFunction};
+use crate::traits::FeatureNamesOut;
+use crate::traits::output_names::subset_names;
 use crate::traits::{Error, FitSupervised, Result, Transform};
 use polars::prelude::*;
 
@@ -201,6 +203,17 @@ impl Transform<DataFrame> for SelectPercentile {
         let refs: Vec<&str> = cols.iter().map(|s| s.as_str()).collect();
         x.select(refs)
             .map_err(|e| Error::Computation(e.to_string()))
+    }
+}
+
+impl FeatureNamesOut for SelectPercentile {
+    /// The learned column subset, in selection order.
+    fn feature_names_out(&self, _input_columns: &[String]) -> Result<Vec<String>> {
+        subset_names(
+            self.fitted,
+            "SelectPercentile",
+            self.selected_columns.as_deref(),
+        )
     }
 }
 

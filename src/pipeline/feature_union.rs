@@ -6,6 +6,8 @@
 //! columns contribute complementary features side by side.
 
 use crate::pipeline::{DataFrameTransformer, ensure_non_empty_rows};
+use crate::traits::FeatureNamesOut;
+use crate::traits::output_names::{ensure_fitted, ensure_unique_names};
 use crate::traits::{Error, Fit, Result, Transform};
 use polars::prelude::*;
 use std::collections::HashMap;
@@ -242,6 +244,29 @@ impl Transform<DataFrame> for FeatureUnion {
     }
 }
 
+impl FeatureNamesOut for FeatureUnion {
+    /// Concatenate every child's output plan for the full input, in order.
+    fn feature_names_out(&self, input_columns: &[String]) -> Result<Vec<String>> {
+        ensure_fitted(self.fitted, "FeatureUnion")?;
+        let mut names = Vec::new();
+        for (name, transformer) in &self.transformers {
+            let part = transformer
+                .feature_names_out(input_columns)
+                .map_err(|e| wrap_error(e, name, "feature_names_out"))?;
+            names.extend(part);
+        }
+        if names.is_empty() {
+            return Err(Error::InvalidInput(
+                "FeatureUnion produced no output columns. \
+                 At least one transformer must return at least one column."
+                    .into(),
+            ));
+        }
+        ensure_unique_names(&names, "FeatureUnion")?;
+        Ok(names)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -249,6 +274,38 @@ mod tests {
     use crate::pipeline::column_transformer::Remainder;
     use crate::preprocessing::binarizer::Binarizer;
     use crate::preprocessing::scaler::StandardScaler;
+
+    /// These test-only transformers have no output plan of their own; their
+    /// identity plan is enough for the pipeline validation tests.
+    macro_rules! identity_feature_names {
+        ($($t:ty),* $(,)?) => {
+            $(impl crate::traits::FeatureNamesOut for $t {
+                fn feature_names_out(
+                    &self,
+                    input_columns: &[String],
+                ) -> crate::traits::Result<Vec<String>> {
+                    Ok(input_columns.to_vec())
+                }
+            })*
+        };
+    }
+    identity_feature_names!(RowDropper);
+    impl crate::traits::FeatureNamesOut for ColumnDropper {
+        fn feature_names_out(
+            &self,
+            _input_columns: &[String],
+        ) -> crate::traits::Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+    }
+    impl crate::traits::FeatureNamesOut for EmptyFrameDropper {
+        fn feature_names_out(
+            &self,
+            _input_columns: &[String],
+        ) -> crate::traits::Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+    }
 
     /// Test-only transformer that keeps only the first row, so the row-count
     /// validation can be exercised.

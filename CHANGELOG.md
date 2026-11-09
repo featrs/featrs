@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `FeatureNamesOut` in `src/traits/output_names.rs` reports the columns a
+  fitted transformer's `transform` emits, as metadata, without materialising a
+  frame. The trait is implemented by every transformer: pass-through and
+  in-place transformers return their input names, selectors return the learned
+  subset, and generators (encoders, interactions, lags, rolling windows, date
+  and text features, …) append the exact names they create. Calling it before
+  `fit` returns `Error::NotFitted`. `FeatureNamesOut` is now a supertrait of
+  `DataFrameTransformer`, so `Pipeline::feature_names_out` threads names through
+  every step, and `ColumnTransformer`, `FeatureUnion`, `ConditionalPipeline`,
+  and `CachedPipeline` aggregate their children in the same order their
+  `transform` stacks them (#83). Custom `DataFrameTransformer` implementations
+  must add a `FeatureNamesOut` implementation.
+
 - `InverseTransform<X>` in `src/traits/inverse.rs` reverses an invertible
   transformer: `inverse_transform` maps data from the transformer's output space
   back to its input space, so predictions can be read in original units and a
