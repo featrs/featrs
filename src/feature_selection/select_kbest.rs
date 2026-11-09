@@ -35,7 +35,9 @@ pub trait ScoreFunction: Send + Sync {
 /// zero. Rows with a null feature value or null target are excluded per column,
 /// and the degrees of freedom are computed from the remaining observations. A
 /// feature with no usable values, or with fewer than two observed target
-/// classes, is rejected.
+/// classes, is rejected. Deviations outside the finite `f64` range are
+/// rejected with [`Error::InvalidInput`]; center or scale the feature before
+/// scoring.
 ///
 /// Requires the target column to be [`Float64`](DataType::Float64).
 pub struct FClassif;
@@ -131,9 +133,14 @@ impl ScoreFunction for FClassif {
                 )));
             }
 
-            let mut ss_between = 0.0;
-            let mut ss_within = 0.0;
-
+            // Pass 1: collect per-group deviations in origin-shifted space.
+            // Squaring these directly overflows at large-but-finite feature
+            // magnitudes (gh-268: a 1e200-scale feature scores NaN while
+            // noise scores 0.0, so SelectKBest keeps the noise), so pass 2
+            // derives a common scale from the deviations and squares the
+            // scaled values. The F ratio is invariant under a common
+            // rescale of both sums of squares.
+            let mut groups: Vec<(f64, Vec<f64>)> = Vec::with_capacity(observed_classes.len());
             for &cls in &observed_classes {
                 let group_vals: Vec<f64> = observed
                     .iter()
@@ -155,11 +162,40 @@ impl ScoreFunction for FClassif {
                     / g_n;
                 let group_to_feature_mean =
                     (group_origin - feature_origin) + group_mean_offset - feature_mean_offset;
+                let devs: Vec<f64> = group_vals
+                    .iter()
+                    .map(|&v| (v - group_origin) - group_mean_offset)
+                    .collect();
+                groups.push((group_to_feature_mean, devs));
+            }
 
-                ss_between += g_n * group_to_feature_mean.powi(2);
+            let mut scale = 0.0f64;
+            for (group_to_feature_mean, devs) in &groups {
+                scale = scale.max(group_to_feature_mean.abs());
+                for &dev in devs {
+                    scale = scale.max(dev.abs());
+                }
+            }
 
-                for &v in &group_vals {
-                    ss_within += ((v - group_origin) - group_mean_offset).powi(2);
+            // Centering happens before the scale is derived. If a finite
+            // input still produces a non-finite deviation, the scaled sums
+            // below would collapse to NaN and the branch at the end would
+            // report a silent 0.0. Reject it instead, as gh-268 permits.
+            if !scale.is_finite() {
+                return Err(Error::InvalidInput(format!(
+                    "FClassif: column '{name}' has deviations outside the finite f64 range. \
+                     Center or scale the column before scoring."
+                )));
+            }
+
+            let mut ss_between = 0.0;
+            let mut ss_within = 0.0;
+            for (group_to_feature_mean, devs) in &groups {
+                if scale > 0.0 {
+                    ss_between += (devs.len() as f64) * (group_to_feature_mean / scale).powi(2);
+                    for &dev in devs {
+                        ss_within += (dev / scale).powi(2);
+                    }
                 }
             }
 
@@ -198,7 +234,9 @@ impl ScoreFunction for FClassif {
 /// to the target scores positive infinity; a constant feature, a constant
 /// target, and any feature with fewer than three usable observations score
 /// zero. Rows with a null feature value or null target are excluded per column,
-/// and `n` is the number of remaining observations.
+/// and `n` is the number of remaining observations. Deviations outside the
+/// finite `f64` range are rejected with [`Error::InvalidInput`]; center or
+/// scale the feature and target before scoring.
 ///
 /// Requires the target column to be [`Float64`](DataType::Float64).
 pub struct FRegression;
@@ -279,15 +317,48 @@ impl ScoreFunction for FRegression {
                 .sum::<f64>()
                 / n;
 
+            // Collect deviations first, then scale feature and target
+            // deviations by their own maxima before squaring (gh-268): at
+            // 1e200 magnitudes the raw squares overflow and r² becomes NaN.
+            // r² is invariant under independent rescales of the two
+            // deviation vectors, so the F-statistic is unchanged.
+            let feature_devs: Vec<f64> = observed
+                .iter()
+                .map(|&(value, _)| (value - feature_origin) - feature_mean_offset)
+                .collect();
+            let target_devs: Vec<f64> = observed
+                .iter()
+                .map(|&(_, target)| (target - target_origin) - target_mean_offset)
+                .collect();
+
+            let mut feature_scale = 0.0f64;
+            let mut target_scale = 0.0f64;
+            for (&feature_dev, &target_dev) in feature_devs.iter().zip(&target_devs) {
+                feature_scale = feature_scale.max(feature_dev.abs());
+                target_scale = target_scale.max(target_dev.abs());
+            }
+
+            // Centering happens before the scales are derived. A finite input
+            // can still produce a non-finite deviation, and the squares below
+            // would become NaN. Reject it instead, as gh-268 permits.
+            if !feature_scale.is_finite() || !target_scale.is_finite() {
+                return Err(Error::InvalidInput(format!(
+                    "FRegression: column '{name}' has deviations outside the finite f64 range. \
+                     Center or scale the feature and target before scoring."
+                )));
+            }
+
             let mut ss_feature = 0.0;
             let mut ss_target = 0.0;
             let mut ss_cross = 0.0;
-            for &(value, target) in &observed {
-                let feature_dev = (value - feature_origin) - feature_mean_offset;
-                let target_dev = (target - target_origin) - target_mean_offset;
-                ss_feature += feature_dev * feature_dev;
-                ss_target += target_dev * target_dev;
-                ss_cross += feature_dev * target_dev;
+            for (&feature_dev, &target_dev) in feature_devs.iter().zip(&target_devs) {
+                if feature_scale > 0.0 && target_scale > 0.0 {
+                    let fs = feature_dev / feature_scale;
+                    let ts = target_dev / target_scale;
+                    ss_feature += fs * fs;
+                    ss_target += ts * ts;
+                    ss_cross += fs * ts;
+                }
             }
 
             let f_stat = if ss_feature == 0.0 || ss_target == 0.0 {
@@ -469,6 +540,114 @@ mod tests {
             "target".into(),
             &[0.0f64, 0.0, 0.0, 1.0, 1.0, 1.0],
         ))
+    }
+
+    #[test]
+    fn test_f_classif_large_magnitudes_do_not_overflow() {
+        // gh-268: a perfectly separating feature at 1e200 scale used to score
+        // NaN (the sums of squares overflowed) while an unrelated noise
+        // feature scored 0.0, so SelectKBest kept the noise.
+        let signal = Column::from(Series::new(
+            "signal".into(),
+            &[1e200f64, 2e200, 3e200, 4e200],
+        ));
+        let noise = Column::from(Series::new("noise".into(), &[5.0f64, 11.0, 7.0, 13.0]));
+        let target = Column::from(Series::new("t".into(), &[0.0f64, 0.0, 1.0, 1.0]));
+        let features = DataFrame::new(4, vec![noise, signal]).unwrap();
+        let y = DataFrame::new(4, vec![target.clone()]).unwrap();
+
+        let scores = FClassif.score(&features, &target).unwrap();
+        let signal_score = scores.iter().find(|(name, _)| name == "signal").unwrap().1;
+        let noise_score = scores.iter().find(|(name, _)| name == "noise").unwrap().1;
+        assert!(signal_score.is_finite(), "signal scored {signal_score}");
+        assert!(signal_score > noise_score);
+
+        let mut selector = SelectKBest::new(1, Box::new(FClassif::new()));
+        selector.fit(features.clone(), y).unwrap();
+        assert_eq!(
+            selector.transform(features).unwrap().get_column_names(),
+            &["signal"]
+        );
+    }
+
+    #[test]
+    fn test_f_regression_large_magnitudes_do_not_overflow() {
+        // gh-268: the regression path squares feature and target deviations
+        // independently, so both must be scaled before squaring.
+        let linear = Column::from(Series::new(
+            "linear".into(),
+            &[1e200f64, 2e200, 3e200, 4e200],
+        ));
+        let noise = Column::from(Series::new("noise".into(), &[11.0f64, 5.0, 13.0, 7.0]));
+        // A target that tracks the feature but is not perfectly linear, so
+        // r² < 1 and the F-statistic is finite rather than the documented
+        // positive-infinity for a perfect fit.
+        let target = Column::from(Series::new("t".into(), &[1.0f64, 2.0, 3.5, 4.0]));
+        let features = DataFrame::new(4, vec![noise, linear]).unwrap();
+
+        let scores = FRegression.score(&features, &target).unwrap();
+        let linear_score = scores.iter().find(|(name, _)| name == "linear").unwrap().1;
+        let noise_score = scores.iter().find(|(name, _)| name == "noise").unwrap().1;
+        assert!(linear_score.is_finite(), "linear scored {linear_score}");
+        assert!(linear_score > noise_score);
+    }
+
+    #[test]
+    fn test_f_classif_rejects_deviations_outside_finite_range() {
+        // Centering overflows before the scale is derived, so the scaled sums
+        // cannot recover. Reject the input instead of reporting a silent 0.0.
+        let signal = Column::from(Series::new("signal".into(), &[0.0f64, 0.0, 1e308, 1e308]));
+        let target = Column::from(Series::new("t".into(), &[0.0f64, 0.0, 1.0, 1.0]));
+        let features = DataFrame::new(4, vec![signal]).unwrap();
+
+        let err = FClassif.score(&features, &target).unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidInput(ref msg) if msg.contains("finite f64 range")),
+            "expected InvalidInput, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_f_regression_rejects_deviations_outside_finite_range() {
+        let linear = Column::from(Series::new(
+            "linear".into(),
+            &[0.0f64, 5e307, 1e308, 1.5e308],
+        ));
+        let target = Column::from(Series::new("t".into(), &[0.0f64, 1.0, 2.0, 3.0]));
+        let features = DataFrame::new(4, vec![linear]).unwrap();
+
+        let err = FRegression.score(&features, &target).unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidInput(ref msg) if msg.contains("finite f64 range")),
+            "expected InvalidInput, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_f_classif_underflow_matches_ordinary_scale() {
+        // The other half of gh-268: 1e-200 inputs used to score 0.0. The
+        // rescale must give the same score as the ordinary-scale column.
+        let tiny = Column::from(Series::new(
+            "tiny".into(),
+            &[1e-200f64, 1.1e-200, 3e-200, 3.1e-200],
+        ));
+        let normal = Column::from(Series::new("normal".into(), &[1.0f64, 1.1, 3.0, 3.1]));
+        let target = Column::from(Series::new("t".into(), &[0.0f64, 0.0, 1.0, 1.0]));
+        let f = FClassif::new();
+        let tiny_score = f
+            .score(&DataFrame::new(4, vec![tiny]).unwrap(), &target)
+            .unwrap()[0]
+            .1;
+        let normal_score = f
+            .score(&DataFrame::new(4, vec![normal]).unwrap(), &target)
+            .unwrap()[0]
+            .1;
+
+        assert!(tiny_score.is_finite(), "tiny scored {tiny_score}");
+        assert!(
+            (tiny_score - normal_score).abs() / normal_score < 1e-12,
+            "tiny={tiny_score} normal={normal_score}"
+        );
     }
 
     #[test]
