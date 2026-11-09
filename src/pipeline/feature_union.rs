@@ -5,7 +5,7 @@
 //! horizontally, so independent feature extractors operating on the same
 //! columns contribute complementary features side by side.
 
-use crate::pipeline::DataFrameTransformer;
+use crate::pipeline::{DataFrameTransformer, ensure_non_empty_rows};
 use crate::traits::{Error, Fit, Result, Transform};
 use polars::prelude::*;
 use std::collections::HashMap;
@@ -25,6 +25,13 @@ use std::collections::HashMap;
 /// names. Pair the union with transformers that emit distinct columns — for
 /// example a [`ColumnTransformer`](crate::pipeline::ColumnTransformer) that
 /// drops the remainder.
+///
+/// # Validation
+///
+/// `fit` rejects a frame with 0 rows or 0 columns with
+/// [`Error::InvalidInput`], matching `ColumnTransformer`. `transform` does
+/// not check the input row count; each transformer output must keep the input
+/// height.
 ///
 /// # Example
 ///
@@ -142,9 +149,13 @@ impl Fit<DataFrame> for FeatureUnion {
                     .into(),
             ));
         }
-        if x.height() == 0 {
+        // Row count first: `DataFrame::empty()` is 0x0, and a 0-row frame
+        // built with an empty column list is (0, 0) too, so the width check
+        // below cannot distinguish them.
+        ensure_non_empty_rows(&x, "FeatureUnion.fit")?;
+        if x.width() == 0 {
             return Err(Error::InvalidInput(
-                "FeatureUnion.fit received a DataFrame with 0 rows.".into(),
+                "FeatureUnion.fit received a DataFrame with 0 columns.".into(),
             ));
         }
 
@@ -430,13 +441,41 @@ mod tests {
 
     #[test]
     fn test_feature_union_empty_input_error() {
-        let mut union =
-            FeatureUnion::new(vec![("scale".into(), Box::new(StandardScaler::new()))]).unwrap();
+        // ColumnDropper::fit accepts any frame, so only the union's row guard
+        // can reject this input.
+        let mut union = FeatureUnion::new(vec![("drop".into(), Box::new(ColumnDropper))]).unwrap();
         let err = union.fit(DataFrame::empty()).unwrap_err();
         assert!(
             matches!(err, Error::InvalidInput(_)),
             "expected InvalidInput, got {err:?}",
         );
+        match err {
+            Error::InvalidInput(msg) => assert!(
+                msg.starts_with("FeatureUnion.fit received a DataFrame with 0 rows"),
+                "got {msg}"
+            ),
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_feature_union_fit_rejects_zero_column_frame() {
+        // ColumnDropper::fit accepts any frame, so only the union's width
+        // guard can reject this input.
+        let mut union = FeatureUnion::new(vec![("drop".into(), Box::new(ColumnDropper))]).unwrap();
+        let zero_col = DataFrame::new(3, vec![]).unwrap();
+        let err = union.fit(zero_col).unwrap_err();
+        match err {
+            Error::InvalidInput(msg) => assert!(
+                msg.starts_with("FeatureUnion.fit received a DataFrame with 0 columns"),
+                "got {msg}"
+            ),
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+        assert!(matches!(
+            union.transform(make_test_df()),
+            Err(Error::NotFitted(_))
+        ));
     }
 
     #[test]

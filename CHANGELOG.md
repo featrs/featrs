@@ -100,6 +100,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `FeatureUnion::fit` now rejects a DataFrame with 0 columns with
+  `Error::InvalidInput`, matching `ColumnTransformer` and
+  `ConditionalPipeline`, instead of fitting and failing later at `transform`
+  with "produced no output columns" (#253).
 - `RollingAggregator::fit` and `Difference::fit` now reject configured columns
   that are not `Float64` with `Error::InvalidInput`, instead of reporting the
   transformer fitted and failing later at `transform`. Frames that previously
