@@ -34,7 +34,9 @@ pub enum CaseStyle {
 pub struct StringReplacement {
     /// Rust `regex` pattern to match.
     pub pattern: String,
-    /// Replacement text; capture references such as `$1` are supported.
+    /// Replacement text; capture references such as `$1` are supported and
+    /// must resolve against [`pattern`](Self::pattern), as checked at
+    /// [`fit`](Fit::fit).
     pub replacement: String,
 }
 
@@ -137,7 +139,8 @@ impl StringCleaner {
     /// Append a regex replacement.
     ///
     /// Replacements run in declaration order after whitespace and case
-    /// operations. The pattern is validated when the cleaner is fitted.
+    /// operations. The pattern and its capture references are validated when
+    /// the cleaner is fitted.
     pub fn replace(mut self, pattern: &str, replacement: &str) -> Self {
         self.invalidate_fit();
         self.replacements.push(StringReplacement {
@@ -209,6 +212,84 @@ fn title_case(value: &str, separator: &str) -> String {
         .join(separator)
 }
 
+/// Reject replacement templates whose capture references cannot be expanded.
+///
+/// The `regex` crate expands an unknown reference to the empty string, which
+/// silently blanks every matched value. Fit is the documented validation
+/// point, so each `$index`, `$name` and `${...}` reference is checked against
+/// the compiled pattern before it can be used by `transform`.
+fn validate_replacement(regex: &Regex, pattern: &str, replacement: &str) -> Result<()> {
+    let bytes = replacement.as_bytes();
+    let mut index = 0;
+    // Once a `${` has no closing brace, no later `${` can have one either.
+    // Remember the failed search so a replacement full of unclosed braces
+    // stays linear instead of rescanning the remaining template each time.
+    let mut unclosed_brace = false;
+    while index < bytes.len() {
+        if bytes[index] != b'$' {
+            index += 1;
+            continue;
+        }
+        if bytes.get(index + 1) == Some(&b'$') {
+            index += 2;
+            continue;
+        }
+
+        let reference_start = index + 1;
+        let (reference, next) = if bytes.get(reference_start) == Some(&b'{') {
+            if unclosed_brace {
+                index += 1;
+                continue;
+            }
+            match replacement[reference_start + 1..].find('}') {
+                Some(offset) => (
+                    &replacement[reference_start + 1..reference_start + 1 + offset],
+                    reference_start + 2 + offset,
+                ),
+                // An unclosed brace is not a capture reference; the regex
+                // crate copies the dollar sign literally.
+                None => {
+                    unclosed_brace = true;
+                    index += 1;
+                    continue;
+                }
+            }
+        } else {
+            let end = replacement[reference_start..]
+                .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .map(|offset| reference_start + offset)
+                .unwrap_or(replacement.len());
+            if end == reference_start {
+                index = reference_start;
+                continue;
+            }
+            (&replacement[reference_start..end], end)
+        };
+        index = next;
+
+        // The `regex` crate parses a reference as a group index first and
+        // falls back to a capture name, so numeric forms that its integer
+        // parser accepts (such as `${+1}`) are valid when the index exists.
+        let resolves = match reference.parse::<usize>() {
+            Ok(number) => number < regex.captures_len(),
+            Err(_) => regex
+                .capture_names()
+                .flatten()
+                .any(|name| name == reference),
+        };
+        if !resolves {
+            return Err(Error::InvalidInput(format!(
+                "StringCleaner.fit: replacement '{replacement}' for pattern '{pattern}' \
+                 references capture '{reference}', which the pattern does not define. \
+                 Use a group index below {}, a name declared with (?P<name>...), or escape \
+                 a literal dollar sign with '$$'.",
+                regex.captures_len()
+            )));
+        }
+    }
+    Ok(())
+}
+
 impl Fit<DataFrame> for StringCleaner {
     type Output = ();
 
@@ -261,6 +342,7 @@ impl Fit<DataFrame> for StringCleaner {
                     replacement.pattern, error
                 ))
             })?;
+            validate_replacement(&regex, &replacement.pattern, &replacement.replacement)?;
             compiled.push(CompiledReplacement {
                 regex,
                 replacement: replacement.replacement.clone(),
@@ -556,6 +638,138 @@ mod tests {
     }
 
     #[test]
+    fn test_undefined_numeric_capture_errors_at_fit() {
+        let df = frame(&[Some("abc")]);
+        let mut cleaner = StringCleaner::new()
+            .columns(&["text"])
+            .replace("[a-z]", "$1");
+        let error = cleaner.fit(df).unwrap_err();
+
+        assert!(matches!(error, Error::InvalidInput(_)));
+        let message = error.to_string();
+        assert!(message.contains("references capture '1'"));
+        assert!(message.contains("(?P<name>..."));
+    }
+
+    #[test]
+    fn test_undefined_named_capture_errors_at_fit() {
+        let df = frame(&[Some("abc")]);
+        let mut cleaner = StringCleaner::new()
+            .columns(&["text"])
+            .replace("(?P<word>[a-z]+)", "$letter");
+        let error = cleaner.fit(df).unwrap_err();
+
+        assert!(matches!(error, Error::InvalidInput(_)));
+        assert!(error.to_string().contains("references capture 'letter'"));
+    }
+
+    #[test]
+    fn test_braced_undefined_capture_errors_at_fit() {
+        let df = frame(&[Some("abc")]);
+        let mut cleaner = StringCleaner::new()
+            .columns(&["text"])
+            .replace("([a-z]+)", "${2}");
+        let error = cleaner.fit(df).unwrap_err();
+
+        assert!(matches!(error, Error::InvalidInput(_)));
+        assert!(error.to_string().contains("references capture '2'"));
+    }
+
+    #[test]
+    fn test_named_capture_reference_is_expanded() {
+        let df = frame(&[Some("Hello"), Some("world")]);
+        let mut cleaner = StringCleaner::new()
+            .columns(&["text"])
+            .replace("(?P<word>[A-Za-z]+)", "<$word>");
+        cleaner.fit(df.clone()).unwrap();
+
+        assert_eq!(
+            values(&cleaner.transform(df).unwrap()),
+            vec![Some("<Hello>".into()), Some("<world>".into())]
+        );
+    }
+
+    #[test]
+    fn test_unbraced_whole_match_reference_is_expanded() {
+        let df = frame(&[Some("abc")]);
+        let mut cleaner = StringCleaner::new()
+            .columns(&["text"])
+            .replace("(abc)", "[$0]");
+        cleaner.fit(df.clone()).unwrap();
+
+        assert_eq!(
+            values(&cleaner.transform(df).unwrap()),
+            vec![Some("[abc]".into())]
+        );
+    }
+
+    #[test]
+    fn test_unbraced_numeric_capture_reference_is_expanded() {
+        let df = frame(&[Some("abc")]);
+        let mut cleaner = StringCleaner::new()
+            .columns(&["text"])
+            .replace("(abc)", "[$1]");
+        cleaner.fit(df.clone()).unwrap();
+
+        assert_eq!(
+            values(&cleaner.transform(df).unwrap()),
+            vec![Some("[abc]".into())]
+        );
+    }
+
+    #[test]
+    fn test_braced_signed_numeric_capture_reference_is_expanded() {
+        let df = frame(&[Some("abc")]);
+        let mut cleaner = StringCleaner::new()
+            .columns(&["text"])
+            .replace("(abc)", "[${+1}]");
+        cleaner.fit(df.clone()).unwrap();
+
+        assert_eq!(
+            values(&cleaner.transform(df).unwrap()),
+            vec![Some("[abc]".into())]
+        );
+    }
+
+    #[test]
+    fn test_unclosed_brace_replacement_is_literal() {
+        let df = frame(&[Some("abc")]);
+        let mut cleaner = StringCleaner::new()
+            .columns(&["text"])
+            .replace("abc", "${x${y");
+        cleaner.fit(df.clone()).unwrap();
+
+        assert_eq!(
+            values(&cleaner.transform(df).unwrap()),
+            vec![Some("${x${y".into())]
+        );
+    }
+
+    #[test]
+    fn test_unclosed_brace_does_not_hide_later_unbraced_reference() {
+        let df = frame(&[Some("abc")]);
+        let mut cleaner = StringCleaner::new()
+            .columns(&["text"])
+            .replace("[a-z]", "${oops $1");
+        let error = cleaner.fit(df).unwrap_err();
+
+        assert!(matches!(error, Error::InvalidInput(_)));
+        assert!(error.to_string().contains("references capture '1'"));
+    }
+
+    #[test]
+    fn test_escaped_dollar_is_not_a_capture_reference() {
+        let df = frame(&[Some("5"), Some("x")]);
+        let mut cleaner = StringCleaner::new().columns(&["text"]).replace("x", "$$1");
+        cleaner.fit(df.clone()).unwrap();
+
+        assert_eq!(
+            values(&cleaner.transform(df).unwrap()),
+            vec![Some("5".into()), Some("$1".into())]
+        );
+    }
+
+    #[test]
     fn test_not_fitted_errors() {
         let cleaner = StringCleaner::new().columns(&["text"]);
         let error = cleaner
@@ -618,6 +832,41 @@ mod tests {
             cleaner.transform(wrong_type),
             Err(Error::InvalidInput(_))
         ));
+    }
+
+    #[test]
+    fn test_unbraced_reference_takes_the_full_name() {
+        // An unbraced reference consumes every valid name byte, so `$1a`
+        // references the group named "1a", not group 1 followed by "a".
+        let df = frame(&[Some("abc123")]);
+        let mut cleaner = StringCleaner::new()
+            .columns(&["text"])
+            .replace("([a-z]+)([0-9]+)", "$1a");
+        let error = cleaner.fit(df).unwrap_err();
+
+        assert!(matches!(error, Error::InvalidInput(_)));
+        assert!(
+            error.to_string().contains("$1a"),
+            "message names the template: {error}"
+        );
+    }
+
+    #[test]
+    fn test_failed_template_refit_clears_fitted_state() {
+        let df = frame(&[Some("abc123")]);
+        let mut cleaner = StringCleaner::new()
+            .columns(&["text"])
+            .replace("[a-z]+", "<$0>");
+        cleaner.fit(df.clone()).unwrap();
+
+        // A template failure on re-fit must leave the cleaner unfitted,
+        // just like the dtype failure covered by the refit test above.
+        cleaner = cleaner.replace("[0-9]+", "$1");
+        assert!(matches!(
+            cleaner.fit(df.clone()),
+            Err(Error::InvalidInput(_))
+        ));
+        assert!(matches!(cleaner.transform(df), Err(Error::NotFitted(_))));
     }
 
     #[test]
