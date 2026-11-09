@@ -7,6 +7,9 @@ use polars::prelude::*;
 
 /// Compute differences and percentage changes.
 ///
+/// Every configured column must be [`Float64`](DataType::Float64); `fit`
+/// rejects any other dtype with [`Error::InvalidInput`].
+///
 /// # Example
 ///
 /// ```rust
@@ -65,10 +68,14 @@ impl Fit<DataFrame> for Difference {
             ));
         }
         for col in &self.columns {
-            if x.column(col.as_str()).is_err() {
+            let c = x.column(col.as_str()).map_err(|_| {
+                Error::InvalidInput(format!("Difference: column '{}' not found.", col))
+            })?;
+            if c.dtype() != &DataType::Float64 {
                 return Err(Error::InvalidInput(format!(
-                    "Difference: column '{}' not found.",
-                    col
+                    "Difference: column '{}' has dtype {}; expected Float64.",
+                    col,
+                    c.dtype()
                 )));
             }
         }
