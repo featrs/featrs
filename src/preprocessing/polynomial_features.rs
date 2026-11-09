@@ -84,7 +84,8 @@ impl PolynomialFeatures {
     }
 
     /// Whether to include only interaction features (`a·b`, `a·b·c`, ...)
-    /// and exclude pure powers (`a²`, `a³`, ...). Default: `false`.
+    /// and exclude pure powers (`a²`, `a³`, ...). The original degree-1
+    /// features are retained. Default: `false`.
     pub fn interaction_only(mut self, value: bool) -> Self {
         self.interaction_only = value;
         self
@@ -129,20 +130,29 @@ impl PolynomialFeatures {
         let mut result = Vec::new();
 
         if interaction_only {
-            let max_mask = 1usize << n_features;
-            for mask in 0..max_mask {
-                let sum_bits = mask.count_ones() as usize;
-                if sum_bits >= 2 && sum_bits <= degree {
-                    let mut powers = vec![0usize; n_features];
-                    for (j, cell) in powers.iter_mut().enumerate() {
-                        if mask & (1 << j) != 0 {
-                            *cell = 1;
-                        }
-                    }
-                    result.push(powers);
+            fn combinations(
+                result: &mut Vec<Vec<usize>>,
+                powers: &mut [usize],
+                end: usize,
+                remaining: usize,
+            ) {
+                if remaining == 0 {
+                    result.push(powers.to_vec());
+                    return;
+                }
+                // Choose the largest index first, retaining the old bitmask
+                // order without enumerating all 2^n subsets or shifting by n.
+                for index in remaining - 1..end {
+                    powers[index] = 1;
+                    combinations(result, powers, index, remaining - 1);
+                    powers[index] = 0;
                 }
             }
-            result.sort_by_key(|p| p.iter().sum::<usize>());
+
+            let mut powers = vec![0; n_features];
+            for size in 1..=degree.min(n_features) {
+                combinations(&mut result, &mut powers, n_features, size);
+            }
         } else {
             fn recurse(
                 result: &mut Vec<Vec<usize>>,
@@ -620,10 +630,9 @@ mod tests {
     }
 
     #[test]
-    fn test_passthrough_survives_no_generated_terms() {
-        // interaction_only(true) with a single f64 column yields no terms, and
-        // include_bias(false) leaves output empty. The label must still come
-        // through instead of tripping the "no features" error.
+    fn test_interaction_only_preserves_single_feature_and_passthrough() {
+        // A single numeric feature and its label both survive interaction-only
+        // expansion, even when no higher-order interaction can be formed.
         let mut pf = PolynomialFeatures::new(2)
             .unwrap()
             .include_bias(false)
@@ -636,7 +645,7 @@ mod tests {
         let out = pf.transform(df.clone()).unwrap();
 
         let names: Vec<&str> = out.get_column_names().iter().map(|n| n.as_str()).collect();
-        assert_eq!(names, ["label"]);
+        assert_eq!(names, ["a", "label"]);
         assert!(
             out.column("label")
                 .unwrap()
@@ -655,6 +664,62 @@ mod tests {
         pf.fit(df.clone()).unwrap();
         let result = pf.transform(df).unwrap();
 
-        assert_eq!(result.width(), 1);
+        assert_eq!(result.width(), 3);
+    }
+
+    #[test]
+    fn test_interaction_only_preserves_main_effects_at_word_boundary() {
+        for n in [1, 2, usize::BITS as usize, usize::BITS as usize + 1] {
+            let columns = (0..n)
+                .map(|i| Column::from(Series::new(format!("c{i}").into(), &[2.0f64, 3.0])))
+                .collect();
+            let df = DataFrame::new(2, columns).unwrap();
+            let mut pf = PolynomialFeatures::new(2).unwrap().interaction_only(true);
+            pf.fit(df.clone()).unwrap();
+            let out = pf.transform(df.clone()).unwrap();
+            assert_eq!(out.width(), 1 + n + n * (n - 1) / 2);
+            for col in df.columns() {
+                assert!(out.column(col.name()).unwrap().equals(col));
+            }
+            if n > 1 {
+                assert_eq!(
+                    out.column("c0_c1_inter")
+                        .unwrap()
+                        .f64()
+                        .unwrap()
+                        .into_no_null_iter()
+                        .collect::<Vec<_>>(),
+                    vec![4.0, 9.0]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_interaction_powers_are_bounded_by_degree() {
+        assert_eq!(
+            PolynomialFeatures::generate_powers(0, 3, true),
+            Vec::<Vec<usize>>::new()
+        );
+        assert_eq!(
+            PolynomialFeatures::generate_powers(1, 3, true),
+            vec![vec![1]]
+        );
+        assert_eq!(
+            PolynomialFeatures::generate_powers(3, 1, true),
+            vec![vec![1, 0, 0], vec![0, 1, 0], vec![0, 0, 1]]
+        );
+        assert_eq!(
+            PolynomialFeatures::generate_powers(3, 4, true),
+            vec![
+                vec![1, 0, 0],
+                vec![0, 1, 0],
+                vec![0, 0, 1],
+                vec![1, 1, 0],
+                vec![1, 0, 1],
+                vec![0, 1, 1],
+                vec![1, 1, 1]
+            ]
+        );
     }
 }
