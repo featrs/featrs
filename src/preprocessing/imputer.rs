@@ -3,7 +3,7 @@
 //! [`SimpleImputer`] replaces missing values with a statistic computed from
 //! the non-missing values in each column. Both `null` (`None`) and `NaN`
 //! cells count as missing, matching the crate-wide convention; the fill
-//! statistic is computed only from finite values, and an all-`NaN` column
+//! statistic is computed only from non-`NaN` values, and an all-`NaN` column
 //! is rejected like an all-null one.
 
 use crate::traits::{Error, Fit, Result, Transform};
@@ -26,8 +26,9 @@ pub enum Strategy {
 /// Impute missing values using basic statistics.
 ///
 /// Only operates on [`Float64`](DataType::Float64) columns. A `NaN` cell
-/// counts as missing: it is excluded from the fill statistic and is filled
-/// by [`Transform`] like a `null` cell.
+/// counts as missing: it is excluded from the fill statistic, and a column
+/// that had missing values at fit fills its `NaN` cells through [`Transform`]
+/// like `null` cells.
 ///
 /// # Example
 ///
@@ -423,7 +424,7 @@ mod tests {
     #[test]
     fn test_imputer_mean_nan_counts_as_missing() {
         // NaN counts as missing (see #194): the mean statistic comes from the
-        // finite values only, and both the NaN and the null cells are filled.
+        // non-NaN values only, and both the NaN and the null cells are filled.
         // [1.0, NaN, null, 3.0] -> mean 2.0 -> [1.0, 2.0, 2.0, 3.0].
         let x = Column::from(Series::new(
             "x".into(),
@@ -436,7 +437,7 @@ mod tests {
         let result = imp.transform(df).unwrap();
         let got: Vec<Option<f64>> = result.column("x").unwrap().f64().unwrap().iter().collect();
         assert!(
-            got.iter().all(|v| v.is_some()),
+            got.iter().all(|v| v.is_some_and(|x| x.is_finite())),
             "expected no missing cells left, got {got:?}"
         );
         assert_relative_eq!(got[0].unwrap(), 1.0);
@@ -474,5 +475,19 @@ mod tests {
         let err = imp.fit(df).unwrap_err();
         assert!(matches!(err, Error::Computation(_)), "got {err}");
         assert!(err.to_string().contains("non-missing"), "got {err}");
+    }
+
+    #[test]
+    fn test_imputer_mixed_all_missing_column_error() {
+        // A column mixing nulls and NaNs is all-missing too, and must reach
+        // the same rejection path as an all-null or all-NaN column.
+        let x = Column::from(Series::new(
+            "x".into(),
+            &[Some(f64::NAN), None, Some(f64::NAN)],
+        ));
+        let df = DataFrame::new(3, vec![x]).unwrap();
+        let mut imp = SimpleImputer::mean();
+        let err = imp.fit(df).unwrap_err();
+        assert!(matches!(err, Error::Computation(_)), "got {err}");
     }
 }

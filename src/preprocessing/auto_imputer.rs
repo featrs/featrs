@@ -272,19 +272,25 @@ impl Fit<DataFrame> for AutoImputer {
                 ))
             })?;
 
-            // One pass: the non-missing values feed the skew test, the
-            // missing count feeds the null-fraction test. `NaN` counts as
-            // missing so it never reaches the skew or mean statistics and
-            // `NullColumnBehavior` applies to all-`NaN` columns as well.
+            // One pass: the non-missing values feed the skew test. `nulls`
+            // counts only `None`, because `high_null_threshold` is documented
+            // as a null fraction. `missing` counts both `None` and `NaN`, so a
+            // NaN never reaches the statistic and an all-missing column still
+            // follows `NullColumnBehavior`.
             let mut vals: Vec<f64> = Vec::with_capacity(ca.len());
             let mut nulls = 0usize;
+            let mut missing = 0usize;
             for v in ca.iter() {
                 match v {
                     Some(v) if !v.is_nan() => vals.push(v),
-                    _ => nulls += 1,
+                    Some(_) => missing += 1,
+                    None => {
+                        nulls += 1;
+                        missing += 1;
+                    }
                 }
             }
-            if nulls == 0 {
+            if missing == 0 {
                 continue;
             }
 
@@ -614,7 +620,7 @@ mod tests {
     fn test_nan_counts_as_missing_in_plan_scan() {
         // The plan scan must count NaN as missing so it never enters the
         // skew/mean statistics (see #194). With NaN as a minority the Mean
-        // comes from the finite values only (old behavior: mean = NaN).
+        // comes from the non-NaN values only (old behavior: mean = NaN).
         let df = frame(
             vec![f64_col(
                 "a",
@@ -628,7 +634,7 @@ mod tests {
         let out = imp.transform(df).unwrap();
         let got = vals(&out, "a");
         assert!(
-            got.iter().all(|v| v.is_some()),
+            got.iter().all(|v| v.is_some_and(|x| x.is_finite())),
             "expected no missing cells left, got {got:?}"
         );
         assert_relative_eq!(got[0].unwrap(), 1.0);
@@ -636,18 +642,46 @@ mod tests {
         assert_relative_eq!(got[2].unwrap(), 3.0);
         assert_relative_eq!(got[3].unwrap(), 4.0);
 
-        // NaN also counts toward the missing fraction: [1.0, NaN, 3.0, null]
-        // is 2/4 missing, which is at the 0.5 high-null threshold, so the
-        // column is Skipped (left unchanged) instead of being imputed with a
-        // NaN statistic.
+        // The threshold is a null fraction. The issue's example has one null
+        // and one NaN, so it is below the 0.5 threshold and the delegate fills
+        // both cells with the mean of the non-NaN values, 2.0.
         let df = frame(
             vec![f64_col("b", &[Some(1.0), Some(f64::NAN), Some(3.0), None])],
             4,
         );
         let mut imp = AutoImputer::new();
         imp.fit(df.clone()).unwrap();
+        assert_eq!(imp.chosen_name(), Some("Mean"));
+        assert_eq!(
+            vals(&imp.transform(df).unwrap(), "b"),
+            vec![Some(1.0), Some(2.0), Some(3.0), Some(2.0)]
+        );
+
+        // Two nulls out of four rows is exactly the threshold, so the column
+        // is skipped even though no NaN is involved.
+        let df = frame(vec![f64_col("c", &[Some(1.0), None, Some(3.0), None])], 4);
+        let mut imp = AutoImputer::new();
+        imp.fit(df.clone()).unwrap();
         assert_eq!(imp.chosen_name(), Some("Skipped"));
-        assert!(vals(&imp.transform(df).unwrap(), "b")[1].unwrap().is_nan());
+    }
+
+    #[test]
+    fn test_mixed_nan_and_null_column_follows_null_column_behavior() {
+        let mk = || {
+            frame(
+                vec![f64_col("z", &[Some(f64::NAN), None, Some(f64::NAN)])],
+                3,
+            )
+        };
+
+        let mut imp = AutoImputer::new().null_column_behavior(NullColumnBehavior::Error);
+        let err = imp.fit(mk()).unwrap_err();
+        assert!(matches!(err, Error::InvalidInput(_)), "got {err}");
+
+        let mut imp = AutoImputer::new().null_column_behavior(NullColumnBehavior::Fill);
+        imp.fit(mk()).unwrap();
+        let out = imp.transform(mk()).unwrap();
+        assert_eq!(vals(&out, "z"), vec![Some(NULL_FILL_VALUE); 3]);
     }
 
     #[test]
