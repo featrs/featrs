@@ -27,6 +27,8 @@ pub enum RollingFn {
 /// null produces a null result. `NaN` values are ignored by [`RollingFn::Min`]
 /// and [`RollingFn::Max`]; a complete window containing only `NaN` produces
 /// `NaN`, matching the other aggregators and [`crate::time_series::expanding`].
+/// `NaN` propagates through [`RollingFn::Mean`], [`RollingFn::Sum`], and
+/// [`RollingFn::Std`]: a complete window containing a `NaN` produces `NaN`.
 ///
 /// # Example
 ///
@@ -90,32 +92,8 @@ impl RollingAggregator {
                             // `ExpandingAggregator`. A window whose values are
                             // all NaN therefore yields NaN, not the former
                             // `INFINITY`/`NEG_INFINITY` fold seed.
-                            RollingFn::Min => {
-                                let mut acc: Option<f64> = None;
-                                for v in window.iter().flatten().copied() {
-                                    if v.is_nan() {
-                                        continue;
-                                    }
-                                    acc = Some(match acc {
-                                        None => v,
-                                        Some(a) => a.min(v),
-                                    });
-                                }
-                                acc.unwrap_or(f64::NAN).into()
-                            }
-                            RollingFn::Max => {
-                                let mut acc: Option<f64> = None;
-                                for v in window.iter().flatten().copied() {
-                                    if v.is_nan() {
-                                        continue;
-                                    }
-                                    acc = Some(match acc {
-                                        None => v,
-                                        Some(a) => a.max(v),
-                                    });
-                                }
-                                acc.unwrap_or(f64::NAN).into()
-                            }
+                            RollingFn::Min => window.iter().flatten().copied().reduce(f64::min),
+                            RollingFn::Max => window.iter().flatten().copied().reduce(f64::max),
                             RollingFn::Std => {
                                 let mean = window.iter().flatten().copied().sum::<f64>() / w as f64;
                                 let var = window

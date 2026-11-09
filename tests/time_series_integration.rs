@@ -1,5 +1,6 @@
 use featrs::time_series::cyclical::CyclicalEncoder;
 use featrs::time_series::diff::Difference;
+use featrs::time_series::expanding::{ExpandingAggregator, ExpandingFn};
 use featrs::time_series::lag::Lagger;
 use featrs::time_series::rolling::{RollingAggregator, RollingFn};
 use featrs::traits::{Fit, Transform};
@@ -75,35 +76,52 @@ fn test_cyclical_encoder_integration() {
 }
 
 #[test]
-fn test_rolling_all_nan_window_matches_mean_and_expanding() {
+fn test_rolling_all_nan_window_matches_expanding() {
     // An all-NaN window must yield NaN for Min and Max, not the former
-    // INFINITY/NEG_INFINITY fold seeds (see #251), matching Mean/Sum/Std
-    // and ExpandingAggregator on identical input.
-    let col = Column::from(Series::new(
-        "x".into(),
-        &[f64::NAN, f64::NAN, f64::NAN, f64::NAN],
-    ));
+    // INFINITY/NEG_INFINITY fold seeds (see #251), and must agree with
+    // ExpandingAggregator for every function and window size.
+    let col = Column::from(Series::new("x".into(), &[f64::NAN; 4]));
     let df = DataFrame::new(4, vec![col]).unwrap();
 
-    for (fn_, name) in [
-        (RollingFn::Min, "x_min_2"),
-        (RollingFn::Max, "x_max_2"),
-        (RollingFn::Mean, "x_mean_2"),
-    ] {
-        let mut rolling = RollingAggregator::new(&["x"], 2, fn_);
-        rolling.fit(df.clone()).unwrap();
-        let out = rolling.transform(df.clone()).unwrap();
-        let v = out
-            .column(name)
-            .unwrap()
-            .f64()
-            .unwrap()
-            .get(2)
-            .unwrap_or_default();
-        assert!(
-            v.is_nan(),
-            "expected NaN for {name} on an all-NaN window, got {v}"
-        );
+    for w in [2, 3] {
+        for (rolling_fn, expanding_fn, suffix) in [
+            (RollingFn::Min, ExpandingFn::Min, "min"),
+            (RollingFn::Max, ExpandingFn::Max, "max"),
+            (RollingFn::Mean, ExpandingFn::Mean, "mean"),
+            (RollingFn::Sum, ExpandingFn::Sum, "sum"),
+            (RollingFn::Std, ExpandingFn::Std, "std"),
+        ] {
+            let mut rolling = RollingAggregator::new(&["x"], w, rolling_fn);
+            rolling.fit(df.clone()).unwrap();
+            let rolled = rolling.transform(df.clone()).unwrap();
+            let rolled = rolled
+                .column(format!("x_{suffix}_{w}").as_str())
+                .unwrap()
+                .f64()
+                .unwrap();
+
+            let mut expanding = ExpandingAggregator::new(&["x"], expanding_fn).min_periods(w);
+            expanding.fit(df.clone()).unwrap();
+            let expanded = expanding.transform(df.clone()).unwrap();
+            let expanded = expanded
+                .column(format!("x_expanding_{suffix}").as_str())
+                .unwrap()
+                .f64()
+                .unwrap();
+
+            for i in (w - 1)..df.height() {
+                let r = rolled.get(i);
+                let e = expanded.get(i);
+                assert!(
+                    r.is_some_and(|v| v.is_nan()),
+                    "rolling {suffix} w={w} index {i}: {r:?}"
+                );
+                assert!(
+                    e.is_some_and(|v| v.is_nan()),
+                    "expanding {suffix} w={w} index {i}: {e:?}"
+                );
+            }
+        }
     }
 }
 
@@ -117,24 +135,36 @@ fn test_rolling_min_max_ignores_nan_in_mixed_windows() {
     ));
     let df = DataFrame::new(6, vec![col]).unwrap();
 
-    let mut rolling = RollingAggregator::new(&["x"], 2, RollingFn::Min);
-    rolling.fit(df.clone()).unwrap();
-    let out = rolling.transform(df).unwrap();
-
-    // Mixed windows: index 0 -> None (window not complete);
-    // index 1 window [1.0, NaN] -> 1.0 (NaN ignored); index 2 [NaN, 2.0] -> 2.0;
-    // index 3 [2.0, 3.0] -> 2.0; index 4 [3.0, NaN] -> 3.0; index 5 [NaN, 5.0] -> 5.0.
-    let vals: Vec<Option<f64>> = out
-        .column("x_min_2")
-        .unwrap()
-        .f64()
-        .unwrap()
-        .iter()
-        .collect();
-    assert_eq!(vals[0], None);
-    assert_eq!(vals[1], Some(1.0));
-    assert_eq!(vals[2], Some(2.0));
-    assert_eq!(vals[3], Some(2.0));
-    assert_eq!(vals[4], Some(3.0));
-    assert_eq!(vals[5], Some(5.0));
+    for (fn_, name, expected) in [
+        (
+            RollingFn::Min,
+            "x_min_2",
+            [
+                None,
+                Some(1.0f64),
+                Some(2.0),
+                Some(2.0),
+                Some(3.0),
+                Some(5.0),
+            ],
+        ),
+        (
+            RollingFn::Max,
+            "x_max_2",
+            [
+                None,
+                Some(1.0f64),
+                Some(2.0),
+                Some(3.0),
+                Some(3.0),
+                Some(5.0),
+            ],
+        ),
+    ] {
+        let mut rolling = RollingAggregator::new(&["x"], 2, fn_);
+        rolling.fit(df.clone()).unwrap();
+        let out = rolling.transform(df.clone()).unwrap();
+        let vals: Vec<Option<f64>> = out.column(name).unwrap().f64().unwrap().iter().collect();
+        assert_eq!(vals, expected.to_vec(), "{name}");
+    }
 }
