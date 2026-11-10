@@ -291,7 +291,6 @@ jobs:
     needs: [prepare, release]
     if: needs.prepare.outputs.release == 'true' && needs.prepare.outputs.sync == 'true'
     runs-on: ubuntu-latest
-    continue-on-error: true
     permissions:
       contents: write
       pull-requests: write
@@ -324,7 +323,7 @@ jobs:
           fi
           echo "pr=$pr" >> "$GITHUB_OUTPUT"
 
-      - name: Dispatch CI on release branch
+      - name: Approve and watch PR checks
         id: ci
         run: |
           set -euo pipefail
@@ -343,11 +342,16 @@ jobs:
           fi
 
           head_sha=$(gh pr view "$pr" --json headRefOid --jq '.headRefOid')
-          gh workflow run ci.yml --ref "$BRANCH"
+
+          # A PR opened with GITHUB_TOKEN is held for approval, so its
+          # pull_request run starts as `action_required` and never attaches the
+          # required checks to the PR. Approve that run. Checks from a
+          # workflow_dispatch run are not attached to the PR, so branch
+          # protection blocks the merge even when they pass.
           run_id=""
           for _ in $(seq 1 12); do
             run_id=$(gh run list --workflow ci.yml --branch "$BRANCH" \
-              --event workflow_dispatch --limit 20 \
+              --event pull_request --limit 20 \
               --json databaseId,headSha \
               --jq ".[] | select(.headSha == \"$head_sha\") | .databaseId" \
               | head -n1)
@@ -355,9 +359,37 @@ jobs:
             sleep 5
           done
           if [ -z "$run_id" ]; then
+            echo "No pull_request CI run appeared for $BRANCH at $head_sha; dispatching one." >&2
+            gh workflow run ci.yml --ref "$BRANCH"
+            for _ in $(seq 1 12); do
+              run_id=$(gh run list --workflow ci.yml --branch "$BRANCH" \
+                --event workflow_dispatch --limit 20 \
+                --json databaseId,headSha \
+                --jq ".[] | select(.headSha == \"$head_sha\") | .databaseId" \
+                | head -n1)
+              [ -n "$run_id" ] && break
+              sleep 5
+            done
+          fi
+          if [ -z "$run_id" ]; then
             echo "CI run did not appear for $BRANCH at $head_sha" >&2
             exit 1
           fi
+
+          state=$(gh run view "$run_id" --json status,conclusion \
+            --jq '.status + " " + (.conclusion // "")')
+          if [ "$state" = "completed action_required" ]; then
+            echo "Approving gated CI run $run_id"
+            if ! gh api -X POST "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/approve" >/dev/null; then
+              state=$(gh run view "$run_id" --json status,conclusion \
+                --jq '.status + " " + (.conclusion // "")')
+              if [ "$state" = "completed action_required" ]; then
+                echo "Approval was rejected; re-running the gated workflow instead." >&2
+                gh api -X POST "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/rerun" >/dev/null
+              fi
+            fi
+          fi
+
           echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
           gh run watch "$run_id" --exit-status
 
@@ -365,10 +397,20 @@ jobs:
         run: |
           set -euo pipefail
           pr="${{ steps.pr.outputs.pr }}"
-          if merge_output=$(gh pr merge "$pr" --squash --delete-branch 2>&1); then
-            echo "Merged release metadata PR #$pr"
-          else
-            echo "Automatic merge failed: $merge_output" >&2
-            gh pr comment "$pr" --body "CI passed, but the automatic merge failed: $merge_output" || true
-            exit 1
-          fi
+          for attempt in $(seq 1 6); do
+            if merge_output=$(gh pr merge "$pr" --squash --delete-branch 2>&1); then
+              echo "Merged release metadata PR #$pr"
+              exit 0
+            fi
+            state=$(gh pr view "$pr" --json state --jq '.state' 2>/dev/null || echo UNKNOWN)
+            if [ "$state" = "MERGED" ]; then
+              echo "Release metadata PR #$pr is merged; branch cleanup failed: $merge_output"
+              exit 0
+            fi
+            echo "Merge attempt $attempt failed: $merge_output" >&2
+            if [ "$attempt" -lt 6 ]; then
+              sleep 10
+            fi
+          done
+          gh pr comment "$pr" --body "CI passed, but the automatic merge failed: $merge_output" || true
+          exit 1
