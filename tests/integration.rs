@@ -212,3 +212,60 @@ fn failed_refit_clears_transformer_state() {
     assert!(hasher.fit(empty).is_err());
     assert!(hasher.transform(strings).is_err());
 }
+
+/// End-to-end test: AutoPipeline infers a plan, exposes it, and applies it.
+#[test]
+fn test_end_to_end_auto_pipeline() {
+    use featrs::prelude::*;
+    use featrs::traits::{Fit, Transform};
+
+    let df = DataFrame::new(
+        6,
+        vec![
+            Column::from(Series::new(
+                "age".into(),
+                &[
+                    Some(31.0f64),
+                    None,
+                    Some(45.0),
+                    Some(52.0),
+                    Some(23.0),
+                    Some(38.0),
+                ],
+            )),
+            Column::from(Series::new(
+                "city".into(),
+                &["pune", "delhi", "pune", "mumbai", "delhi", "mumbai"],
+            )),
+            Column::from(Series::new("churned".into(), &[0i32, 1, 0, 1, 0, 1])),
+        ],
+    )
+    .unwrap();
+
+    let mut auto = AutoPipeline::new(
+        AutoPipelineConfig::default()
+            .target("churned")
+            .imputer(AutoImputerConfig::default())
+            .scaler(AutoScalerConfig::default())
+            .cat_threshold(10),
+    );
+    auto.fit(df.clone()).unwrap();
+    assert!(auto.is_fitted());
+    assert_eq!(
+        auto.prepared_pipeline().unwrap().steps()[0].0,
+        "column_transformers"
+    );
+
+    let features = auto.transform(df).unwrap();
+    let names: Vec<String> = features
+        .get_column_names()
+        .iter()
+        .map(|name| name.to_string())
+        .collect();
+    assert_eq!(features.height(), 6);
+    assert_eq!(features.column("age").unwrap().null_count(), 0);
+    assert!(!names.contains(&"churned".to_string()));
+    for expected in ["city_delhi", "city_mumbai", "city_pune"] {
+        assert!(names.contains(&expected.to_string()), "missing {expected}");
+    }
+}

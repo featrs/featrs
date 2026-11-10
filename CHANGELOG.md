@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `AutoPipeline` in `src/automation/auto_pipeline.rs` builds a complete
+  preprocessing `Pipeline` from a `DataFrame`'s inferred schema and exposes it
+  through `prepared_pipeline()`, so the inferred plan can be reviewed before it
+  is applied. `fit` drops all-null columns, removes constant columns (when
+  configured), expands datetime components, optionally trims and collapses
+  string whitespace, groups rare categories, one-hot encodes low-cardinality
+  strings, hashes high-cardinality strings (or target-encodes them for a
+  classification target), and imputes and scales numeric columns when
+  `AutoImputerConfig` / `AutoScalerConfig` are supplied. `AutoPipelineConfig`
+  carries every threshold and toggle, `from_inferred_schema` derives a sensible
+  default plan from the frame, and `transform` validates the input against the
+  schema frozen at fit time and drops the target column. `AutoPipeline` and its
+  config types are exported from the prelude (#85).
+
 - `FeatureNamesOut` in `src/traits/output_names.rs` reports the columns a
   fitted transformer's `transform` emits, as metadata, without materialising a
   frame. The trait is implemented by every transformer: pass-through and

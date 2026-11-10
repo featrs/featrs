@@ -13,7 +13,7 @@ use polars::prelude::*;
 use std::collections::HashMap;
 
 /// Strategy for computing imputation values.
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Strategy {
     /// Replace missing values with the column mean.
     Mean,
