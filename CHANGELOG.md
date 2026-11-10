@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-10
+
+**Milestone:** [v0.6.0 - Pipeline Composition & Automation](https://github.com/featrs/featrs/milestone/3)
+
 ### Added
 
 - `AutoPipeline` in `src/automation/auto_pipeline.rs` builds a complete
@@ -699,7 +703,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Pipeline primitives: `Pipeline`, `ColumnTransformer` with `Remainder`.
 - Comprehensive API docs, module docs, and contributing guide.
 
-[Unreleased]: https://github.com/featrs/featrs/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/featrs/featrs/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/featrs/featrs/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/featrs/featrs/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/featrs/featrs/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/featrs/featrs/compare/v0.3.7...v0.4.0
