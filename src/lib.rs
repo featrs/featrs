@@ -23,7 +23,7 @@
 //!
 //! | Module | Description |
 //! |---|---|
-//! | [`automation`] | Data-quality diagnostics: `DataQualityReport` |
+//! | [`automation`] | Data-quality diagnostics (`DataQualityReport`) and schema-driven `AutoPipeline` |
 //! | [`prelude`] | Convenient glob-import of the most common types |
 //! | [`preprocessing`] | Scaling, encoding, normalization, imputation, binarization, polynomial features, feature hashing, log transformation, auto-type detection |
 //! | [`pipeline`] | `Pipeline` (sequential), `ColumnTransformer` (per-column transforms), `FeatureUnion` (parallel transforms), `ConditionalPipeline` (predicate-routed columns) and `CachedPipeline` (cached step outputs) |
@@ -54,6 +54,10 @@ pub mod util;
 /// let _scaler = StandardScaler::new();
 /// ```
 pub mod prelude {
+    pub use crate::automation::auto_pipeline::{
+        AutoImputerConfig, AutoPipeline, AutoPipelineConfig, AutoScalerConfig,
+        RareCategoryGrouperConfig,
+    };
     pub use crate::automation::data_quality_report::{
         Cardinality, ColumnQualityReport, DataQualityReport, NumericStats, OutlierInfo,
         OverallQuality, Recommendation, StringStats,

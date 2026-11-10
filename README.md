@@ -84,6 +84,7 @@ let scaled = scaler.transform(data)?;
 | | `CorrelationThreshold` | Drop features highly correlated with others |
 | | `MutualInformationSelector` | Rank/select top-k features by mutual information with the target |
 | **Auto** | `AutoTypeDetector` | Auto-detect column types (incl. numeric-string columns) and apply default transforms |
+| | `AutoPipeline` | Infer a preprocessing plan from the frame and assemble a fitted, inspectable `Pipeline`: cleaning, encoding, imputation and scaling |
 | **Schema** | `SchemaSpec` / `validate_schema` | Describe a transformer's required input columns and dtypes, check a frame before transforming, and report every mismatch in one error |
 | **Output schema** | `FeatureNamesOut` | Report the exact output column names, in order, that a fitted transformer's `transform` emits — without materialising data. Implemented by every transformer and threaded through `Pipeline`, `ColumnTransformer`, `FeatureUnion`, `ConditionalPipeline`, and `CachedPipeline` |
 | **Diagnostics** | `DataQualityReport` | Summarise nulls, per-column stats and outliers, cardinality, duplicate rows/columns, constant columns, and the preprocessing it recommends |
@@ -364,6 +365,34 @@ let mut atd = AutoTypeDetector::new()
 atd.fit(df.clone())?;
 let result = atd.transform(df)?;
 ```
+
+### AutoPipeline
+
+```rust
+use featrs::prelude::*;
+use featrs::traits::{Fit, Transform};
+
+let mut auto = AutoPipeline::new(
+    AutoPipelineConfig::default()
+        .target("churned")                     // held out, never transformed
+        .imputer(AutoImputerConfig::default()) // fill Float64 nulls
+        .scaler(AutoScalerConfig::default())   // scale Float64 columns
+        .cat_threshold(30),
+);
+auto.fit(df.clone())?;
+
+// Review what was inferred before transforming.
+for (name, _) in auto.prepared_pipeline()?.steps() {
+    println!("{name}");
+}
+
+let features = auto.transform(df)?; // the target column is dropped
+```
+
+It drops all-null columns, removes constants, expands datetime components,
+one-hot encodes low-cardinality strings, hashes or target-encodes
+high-cardinality strings, and freezes the feature schema so `transform`
+rejects drifted inputs.
 
 ### Data Quality Report
 
