@@ -15,9 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is applied. `fit` drops all-null columns, removes constant columns (when
   configured), expands datetime components, optionally trims and collapses
   string whitespace, groups rare categories, one-hot encodes low-cardinality
-  strings, hashes high-cardinality strings (or target-encodes them for a
-  classification target), and imputes and scales numeric columns when
-  `AutoImputerConfig` / `AutoScalerConfig` are supplied. `AutoPipelineConfig`
+  strings, hashes high-cardinality strings (or target-encodes them for a binary
+  classification target), and imputes and scales `Float64` columns when
+  `AutoImputerConfig` / `AutoScalerConfig` are supplied. Unseen one-hot
+  categories are ignored by default so new data can be scored;
+  `AutoPipelineConfig::handle_unknown` restores the strict behaviour. `AutoPipelineConfig`
   carries every threshold and toggle, `from_inferred_schema` derives a sensible
   default plan from the frame, and `transform` validates the input against the
   schema frozen at fit time and drops the target column. `AutoPipeline` and its

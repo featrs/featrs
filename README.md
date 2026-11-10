@@ -375,8 +375,8 @@ use featrs::traits::{Fit, Transform};
 let mut auto = AutoPipeline::new(
     AutoPipelineConfig::default()
         .target("churned")                     // held out, never transformed
-        .imputer(AutoImputerConfig::default()) // fill numeric nulls
-        .scaler(AutoScalerConfig::default())   // scale numeric columns
+        .imputer(AutoImputerConfig::default()) // fill Float64 nulls
+        .scaler(AutoScalerConfig::default())   // scale Float64 columns
         .cat_threshold(30),
 );
 auto.fit(df.clone())?;

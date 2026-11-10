@@ -18,15 +18,19 @@
 //! | `String`, low cardinality | [`StringCleaner`] when configured, [`RareCategoryGrouper`] when configured, one-hot encoded |
 //! | `String`, high cardinality | [`StringCleaner`], optional grouper, then target encoding (classification target) or feature hashing |
 //! | `String` that looks numeric | forwarded unchanged as `String` (matching [`AutoTypeDetector`]) |
-//! | numeric dtype | [`AutoImputer`] when configured, then [`AutoScaler`] when configured |
+//! | `Float64` | [`AutoImputer`] when configured, then [`AutoScaler`] when configured |
+//! | other numeric (`Int*`, `UInt*`, `Float32`) | forwarded unchanged; imputing and scaling are `Float64`-only |
 //! | anything else (`Boolean`, nested …) | forwarded unchanged |
 //!
 //! The target column named by [`target`](AutoPipelineConfig::target) is never
 //! part of the output. It is only used, and only required, when a high
 //! cardinality `String` column is target-encoded: that path needs a
-//! classification target, detected by dtype (`Int*`, `UInt*` or `Boolean`) and
-//! cast to `Float64` for [`TargetEncoder`]. A `Float32`/`Float64` target is
-//! treated as continuous, so high-cardinality strings are hashed instead.
+//! classification target, detected by dtype (`Int*`, `UInt*` or `Boolean`)
+//! with two distinct non-null values, and cast to `Float64` for
+//! [`TargetEncoder`]. A target with more than two classes is hashed instead,
+//! because a per-category mean is only meaningful for a binary target. A
+//! `Float32`/`Float64` target is treated as continuous, so high-cardinality
+//! strings are hashed instead.
 //!
 //! # Schema contract
 //!
@@ -76,7 +80,7 @@ use crate::preprocessing::auto_type::{AutoTypeDetector, ColumnType};
 use crate::preprocessing::constant_column_remover::ConstantColumnRemover;
 use crate::preprocessing::datetime_features::DatetimeFeatures;
 use crate::preprocessing::duplicate_column_remover::DuplicateColumnRemover;
-use crate::preprocessing::encoder::OneHotEncoder;
+use crate::preprocessing::encoder::{HandleUnknown, OneHotEncoder};
 use crate::preprocessing::encoder_target::TargetEncoder;
 use crate::preprocessing::feature_hasher::FeatureHasher;
 use crate::preprocessing::imputer::Strategy;
@@ -277,6 +281,9 @@ pub struct AutoPipelineConfig {
     /// Trim and collapse whitespace in `String` columns before encoding
     /// (default `false`).
     pub normalize_strings: bool,
+    /// Policy for one-hot categories that were not seen at fit time
+    /// (default [`HandleUnknown::Ignore`], so new data can be scored).
+    pub handle_unknown: HandleUnknown,
     /// Optional rare-category grouping before encoding.
     pub rare_category_grouper: Option<RareCategoryGrouperConfig>,
     /// Optional automatic scaling of numeric columns.
@@ -295,6 +302,7 @@ impl Default for AutoPipelineConfig {
             remove_constant: true,
             remove_duplicates: false,
             normalize_strings: false,
+            handle_unknown: HandleUnknown::Ignore,
             rare_category_grouper: None,
             scaler: None,
             imputer: None,
@@ -347,6 +355,12 @@ impl AutoPipelineConfig {
     /// Enable or disable string whitespace normalization.
     pub fn normalize_strings(mut self, normalize: bool) -> Self {
         self.normalize_strings = normalize;
+        self
+    }
+
+    /// Set the policy for one-hot categories unseen at fit time.
+    pub fn handle_unknown(mut self, policy: HandleUnknown) -> Self {
+        self.handle_unknown = policy;
         self
     }
 
@@ -404,8 +418,8 @@ impl AutoPipeline {
     /// Build a pipeline whose policy is inferred from `df`.
     ///
     /// The returned pipeline uses the default configuration plus automatic
-    /// imputation when a numeric column has missing values and automatic
-    /// scaling when the frame has at least one numeric column.
+    /// imputation when a `Float64` column has missing values and automatic
+    /// scaling when the frame has at least one `Float64` column.
     ///
     /// # Errors
     ///
@@ -423,10 +437,12 @@ impl AutoPipeline {
         }
 
         let mut config = AutoPipelineConfig::default();
+        // `AutoImputer` and `AutoScaler` only operate on Float64 columns, so
+        // only those enable the numeric steps.
         let numeric = df
             .columns()
             .iter()
-            .filter(|column| is_numeric_dtype(column.dtype()));
+            .filter(|column| matches!(column.dtype(), DataType::Float64));
         let mut has_numeric = false;
         let mut has_missing_numeric = false;
         for column in numeric {
@@ -633,7 +649,12 @@ impl AutoPipeline {
                 continue;
             }
             if is_numeric_dtype(dtype) {
-                numeric.push(name);
+                // `AutoImputer` and `AutoScaler` only handle Float64. Other
+                // numeric dtypes fall through to the passthrough remainder so
+                // their values are never coerced lossily.
+                if matches!(dtype, DataType::Float64) {
+                    numeric.push(name);
+                }
                 continue;
             }
             if !matches!(dtype, DataType::String) {
@@ -707,62 +728,17 @@ impl AutoPipeline {
             }
         }
         if use_target_encoder {
-            let y = y.ok_or_else(|| {
-                Error::InvalidInput(
-                    "AutoPipeline.fit: target encoding requires the configured target column."
-                        .to_string(),
-                )
-            })?;
-            let target_series = y
-                .columns()
-                .first()
-                .ok_or_else(|| {
-                    Error::InvalidInput(
-                        "AutoPipeline.fit: target encoding requires a non-empty target."
-                            .to_string(),
-                    )
-                })?
-                .as_materialized_series()
-                .cast(&DataType::Float64)
-                .map_err(|error| {
-                    Error::InvalidInput(format!(
-                        "AutoPipeline.fit: the target must be numeric for target encoding: {error}"
-                    ))
-                })?;
-            let target_frame = DataFrame::new(y.height(), vec![Column::from(target_series)])
-                .map_err(|error| {
-                    Error::Computation(format!(
-                        "AutoPipeline.fit: failed to prepare the target for target encoding: {error}"
-                    ))
-                })?;
-            steps.push((
-                "target_encode_high_cardinality".to_string(),
-                Box::new(TargetEncoderStep::new(
-                    high_cardinality.clone(),
-                    target_frame,
-                )),
-            ));
+            steps.push(target_encoder_step(high_cardinality.clone(), y)?);
         }
 
-        let mut entries: Vec<(String, Box<dyn DataFrameTransformer>, Vec<String>)> = Vec::new();
-        if !numeric.is_empty() && (config.imputer.is_some() || config.scaler.is_some()) {
-            let mut numeric_steps: Vec<(String, Box<dyn DataFrameTransformer>)> = Vec::new();
-            if let Some(imputer) = &config.imputer {
-                numeric_steps.push(("imputer".to_string(), Box::new(imputer.build())));
-            }
-            if let Some(scaler) = &config.scaler {
-                numeric_steps.push(("scaler".to_string(), Box::new(scaler.build())));
-            }
-            entries.push((
-                "numeric".to_string(),
-                Box::new(Pipeline::new(numeric_steps)?),
-                numeric,
-            ));
+        let mut entries: Vec<ColumnEntry> = Vec::new();
+        if let Some(entry) = numeric_entry(numeric, config)? {
+            entries.push(entry);
         }
         if !low_cardinality.is_empty() {
             entries.push((
                 "categorical".to_string(),
-                Box::new(OneHotEncoder::new()),
+                Box::new(OneHotEncoder::new().handle_unknown(config.handle_unknown)),
                 low_cardinality,
             ));
         }
@@ -786,6 +762,62 @@ impl AutoPipeline {
         }
         Pipeline::new(steps)
     }
+}
+
+type ColumnEntry = (String, Box<dyn DataFrameTransformer>, Vec<String>);
+
+fn numeric_entry(columns: Vec<String>, config: &AutoPipelineConfig) -> Result<Option<ColumnEntry>> {
+    if columns.is_empty() || (config.imputer.is_none() && config.scaler.is_none()) {
+        return Ok(None);
+    }
+    let mut steps: Vec<(String, Box<dyn DataFrameTransformer>)> = Vec::new();
+    if let Some(imputer) = &config.imputer {
+        steps.push(("imputer".to_string(), Box::new(imputer.build())));
+    }
+    if let Some(scaler) = &config.scaler {
+        steps.push(("scaler".to_string(), Box::new(scaler.build())));
+    }
+    Ok(Some((
+        "numeric".to_string(),
+        Box::new(Pipeline::new(steps)?),
+        columns,
+    )))
+}
+
+fn target_encoder_step(
+    columns: Vec<String>,
+    y: Option<&DataFrame>,
+) -> Result<(String, Box<dyn DataFrameTransformer>)> {
+    let y = y.ok_or_else(|| {
+        Error::InvalidInput(
+            "AutoPipeline.fit: target encoding requires the configured target column.".to_string(),
+        )
+    })?;
+    let target_series = y
+        .columns()
+        .first()
+        .ok_or_else(|| {
+            Error::InvalidInput(
+                "AutoPipeline.fit: target encoding requires a non-empty target.".to_string(),
+            )
+        })?
+        .as_materialized_series()
+        .cast(&DataType::Float64)
+        .map_err(|error| {
+            Error::InvalidInput(format!(
+                "AutoPipeline.fit: the target must be numeric for target encoding: {error}"
+            ))
+        })?;
+    let target_frame =
+        DataFrame::new(y.height(), vec![Column::from(target_series)]).map_err(|error| {
+            Error::Computation(format!(
+                "AutoPipeline.fit: failed to prepare the target for target encoding: {error}"
+            ))
+        })?;
+    Ok((
+        "target_encode_high_cardinality".to_string(),
+        Box::new(TargetEncoderStep::new(columns, target_frame)),
+    ))
 }
 
 impl Fit<DataFrame> for AutoPipeline {
@@ -827,8 +859,17 @@ impl Fit<DataFrame> for AutoPipeline {
                     "AutoPipeline.fit: target column '{target}' is not present in the DataFrame."
                 ))
             })?;
-            let classification = target_column.dtype().is_integer()
-                || matches!(target_column.dtype(), DataType::Boolean);
+            // Target encoding averages the target per category, which is only
+            // meaningful for a binary classification target. Multiclass
+            // integer targets are hashed below instead.
+            let distinct_targets = target_column.drop_nulls().n_unique().map_err(|error| {
+                Error::Computation(format!(
+                    "AutoPipeline.fit: failed to count distinct target values: {error}"
+                ))
+            })?;
+            let classification = (target_column.dtype().is_integer()
+                || matches!(target_column.dtype(), DataType::Boolean))
+                && distinct_targets <= 2;
             let y = DataFrame::new(
                 x.height(),
                 vec![Column::from(target_column.as_materialized_series().clone())],
@@ -1160,6 +1201,10 @@ mod tests {
     }
 
     fn str_column(name: &str, values: &[&str]) -> Column {
+        Column::from(Series::new(name.into(), values))
+    }
+
+    fn i64_column(name: &str, values: &[i64]) -> Column {
         Column::from(Series::new(name.into(), values))
     }
 
@@ -1630,5 +1675,112 @@ mod tests {
         auto.fit(second.clone()).unwrap();
         let out = auto.transform(second).unwrap();
         assert_eq!(out.get_column_names(), vec!["b"]);
+    }
+
+    #[test]
+    fn integer_columns_are_not_sent_to_float_only_steps() {
+        let x = frame(vec![i64_column("counts", &[1, 2, 3])]);
+        let mut auto =
+            AutoPipeline::new(AutoPipelineConfig::default().scaler(AutoScalerConfig::default()));
+        auto.fit(x.clone()).unwrap();
+        let out = auto.transform(x.clone()).unwrap();
+
+        assert!(out.equals_missing(&x));
+        assert_eq!(out.column("counts").unwrap().dtype(), &DataType::Int64);
+    }
+
+    #[test]
+    fn mixed_integer_and_float_columns_keep_integer_precision() {
+        let x = frame(vec![
+            i64_column("counts", &[1, 2, 3]),
+            f64_column("height", &[10.0, 20.0, 30.0]),
+        ]);
+        let mut auto =
+            AutoPipeline::new(AutoPipelineConfig::default().scaler(AutoScalerConfig::default()));
+        auto.fit(x.clone()).unwrap();
+        let out = auto.transform(x).unwrap();
+
+        let counts = out.column("counts").unwrap();
+        assert_eq!(counts.dtype(), &DataType::Int64);
+        assert_eq!(counts.i64().unwrap().get(0), Some(1));
+        assert_eq!(out.column("height").unwrap().dtype(), &DataType::Float64);
+    }
+
+    #[test]
+    fn unseen_categories_are_ignored_by_default() {
+        let train = frame(vec![str_column("city", &["a", "b", "a", "b"])]);
+        let mut auto = AutoPipeline::new(AutoPipelineConfig::default().cat_threshold(5));
+        auto.fit(train).unwrap();
+
+        let new = frame(vec![str_column("city", &["a", "c"])]);
+        let out = auto.transform(new).unwrap();
+        let names: Vec<String> = out
+            .get_column_names()
+            .iter()
+            .map(|name| name.to_string())
+            .collect();
+
+        assert_eq!(names, vec!["city_a", "city_b"]);
+        assert_eq!(
+            out.column("city_a").unwrap().f64().unwrap().get(1),
+            Some(0.0)
+        );
+    }
+
+    #[test]
+    fn strict_unknown_policy_rejects_new_categories() {
+        let train = frame(vec![str_column("city", &["a", "b", "a", "b"])]);
+        let mut auto = AutoPipeline::new(
+            AutoPipelineConfig::default()
+                .cat_threshold(5)
+                .handle_unknown(HandleUnknown::Error),
+        );
+        auto.fit(train).unwrap();
+
+        let new = frame(vec![str_column("city", &["a", "c"])]);
+        assert!(auto.transform(new).is_err());
+    }
+
+    #[test]
+    fn grouper_absorbs_unseen_categories_even_without_a_rare_value_at_fit() {
+        let train = frame(vec![str_column("city", &["a", "b", "a", "b"])]);
+        let mut auto = AutoPipeline::new(
+            AutoPipelineConfig::default()
+                .cat_threshold(5)
+                .rare_category_grouper(
+                    RareCategoryGrouperConfig::default().threshold(Threshold::MinCount(1)),
+                ),
+        );
+        auto.fit(train).unwrap();
+
+        let new = frame(vec![str_column("city", &["c", "a"])]);
+        let out = auto.transform(new).unwrap();
+
+        // `Other` was never seen at fit, so the unseen category encodes to an
+        // all-zeros row instead of failing.
+        assert_eq!(out.width(), 2);
+        assert_eq!(
+            out.column("city_a").unwrap().f64().unwrap().get(1),
+            Some(1.0)
+        );
+    }
+
+    #[test]
+    fn multiclass_integer_targets_are_hashed_instead_of_target_encoded() {
+        let x = frame(vec![
+            str_column("city", &["a", "b", "c", "d", "e", "f"]),
+            Column::from(Series::new("y".into(), &[0i32, 1, 2, 0, 1, 2])),
+        ]);
+        let mut auto = AutoPipeline::new(
+            AutoPipelineConfig::default()
+                .target("y")
+                .cat_threshold(3)
+                .hash_buckets(4),
+        );
+        auto.fit(x.clone()).unwrap();
+        let out = auto.transform(x).unwrap();
+
+        assert_eq!(out.width(), 4);
+        assert!(out.get_column_names()[0].as_str().starts_with("hashed_"));
     }
 }
