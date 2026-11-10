@@ -48,10 +48,12 @@ Releases follow the GitHub milestones:
   the milestone version, tags it, publishes to crates.io, and creates the
   GitHub release.
 - **Release metadata**: after a milestone release, the workflow opens a
-  `chore: sync vX.Y.Z release metadata` PR and dispatches CI on its branch. If
-  branch protection permits, it merges automatically; otherwise merge it once
-  CI passes. The next milestone release refuses to run until this PR is merged,
-  because its changelog would otherwise duplicate the previous release.
+  `chore: sync vX.Y.Z release metadata` PR. A PR opened with the repository
+  token starts its CI in an approval-required state, so the workflow approves
+  (or re-runs) that CI run, waits for the required checks, and merges. If the
+  merge still fails, merge the PR once CI passes. The next milestone release
+  refuses to run until this PR is merged, because its changelog would otherwise
+  duplicate the previous release.
 
 Milestone titles must start with a version: `v0.6.0`, `0.6.0`, `v1.0.0`, etc.
 Patch milestones (`0.6.1`) are rejected; patch releases are automated
