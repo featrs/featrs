@@ -13,9 +13,13 @@
 //! unchanged.
 
 use crate::traits::FeatureNamesOut;
+#[cfg(feature = "lazy")]
+use crate::traits::lazy::collect_fit_frame;
 use crate::traits::output_names::identity_names;
 use crate::traits::schema::{RequiresSchema, SchemaSpec};
 use crate::traits::{Error, Fit, Result, Transform};
+#[cfg(feature = "lazy")]
+use crate::traits::{FitLazy, TransformLazy};
 use crate::util::{replace_f64_column_opt, require_f64_columns};
 use polars::prelude::*;
 
@@ -52,6 +56,11 @@ pub struct Binarizer {
 }
 
 impl Binarizer {
+    /// Drop the fitted state so a failed fit cannot reuse stale parameters.
+    fn reset_fit(&mut self) {
+        self.fitted = false;
+    }
+
     /// Create a new `Binarizer` with the given threshold.
     ///
     /// Values strictly greater than `threshold` are set to `1.0`. The
@@ -82,7 +91,7 @@ impl Fit<DataFrame> for Binarizer {
     fn fit(&mut self, x: DataFrame) -> Result<()> {
         // Reset fitted state up front: if this fit fails, transform must
         // not silently apply a stale configuration from a previous fit.
-        self.fitted = false;
+        self.reset_fit();
 
         if !self.threshold.is_finite() {
             return Err(Error::InvalidInput(format!(
@@ -141,6 +150,83 @@ impl Transform<DataFrame> for Binarizer {
             })?;
         }
 
+        Ok(out)
+    }
+}
+
+#[cfg(feature = "lazy")]
+impl FitLazy for Binarizer {
+    type Output = ();
+
+    fn fit_lazy(&mut self, x: LazyFrame) -> Result<()> {
+        self.reset_fit();
+        let df = collect_fit_frame(x, "Binarizer")?;
+        self.fit(df)
+    }
+}
+
+#[cfg(feature = "lazy")]
+impl TransformLazy for Binarizer {
+    type Output = LazyFrame;
+
+    /// Append the binarization of every `Float64` column to the plan.
+    ///
+    /// Float64 columns are discovered from the lazy schema without collecting
+    /// the frame. Nulls and `NaN` become null, `v > threshold` becomes `1.0`,
+    /// and any other value becomes `0.0`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::NotFitted` if called before fitting, and
+    /// `Error::InvalidInput` if the schema has no `Float64` column.
+    fn transform_lazy(&self, x: LazyFrame) -> Result<LazyFrame> {
+        if !self.fitted {
+            return Err(Error::NotFitted(
+                "Binarizer has not been fitted. \
+                 Call .fit(dataframe) or .fit_lazy(lazy_frame) before .transform_lazy()."
+                    .into(),
+            ));
+        }
+
+        let mut out = x;
+        let schema = out.collect_schema().map_err(|e| {
+            Error::Computation(format!(
+                "Binarizer.transform_lazy: could not resolve the LazyFrame schema. {e}"
+            ))
+        })?;
+        let mut col_names = Vec::new();
+        let mut available = Vec::new();
+        for (name, dtype) in schema.iter() {
+            if dtype == &DataType::Float64 {
+                col_names.push(name.to_string());
+            }
+            available.push(format!("'{name}' ({dtype})"));
+        }
+        if col_names.is_empty() {
+            return Err(Error::InvalidInput(format!(
+                "Binarizer: no Float64 columns found. \
+                 This transformer only operates on f64 columns. \
+                 Available columns: [{}]. Cast non-f64 columns before fitting.",
+                available.join(", ")
+            )));
+        }
+
+        let threshold = self.threshold;
+        for name in &col_names {
+            let value = col(name.as_str());
+            let binarized = when(value.clone().is_null())
+                .then(lit(NULL))
+                .otherwise(
+                    when(value.clone().is_nan()).then(lit(NULL)).otherwise(
+                        when(value.gt(lit(threshold)))
+                            .then(lit(1.0))
+                            .otherwise(lit(0.0)),
+                    ),
+                )
+                .cast(DataType::Float64)
+                .alias(name.as_str());
+            out = out.with_column(binarized);
+        }
         Ok(out)
     }
 }

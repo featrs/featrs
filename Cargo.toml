@@ -17,9 +17,18 @@ regex = "1"
 statrs = "0.19"
 thiserror = "2"
 
+[features]
+# LazyFrame support. Needs Rust 1.95+, because the Polars lazy engine
+# compiles `polars-stream`, which uses `Atomic*::try_update`.
+lazy = ["polars/lazy", "polars/strings", "polars/log"]
+
 [dev-dependencies]
 approx = "0.5"
 
 [lib]
 name = "featrs"
 path = "src/lib.rs"
+
+[[test]]
+name = "lazyframe_integration"
+required-features = ["lazy"]

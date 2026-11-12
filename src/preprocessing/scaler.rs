@@ -9,9 +9,13 @@ use polars::prelude::*;
 
 use crate::traits::FeatureNamesOut;
 use crate::traits::inverse::{HasInverse, InverseTransform};
+#[cfg(feature = "lazy")]
+use crate::traits::lazy::{collect_fit_frame, require_lazy_f64_columns};
 use crate::traits::output_names::{ensure_required_present, identity_names};
 use crate::traits::schema::{RequiresSchema, SchemaSpec};
 use crate::traits::{Error, Fit, Result, Transform};
+#[cfg(feature = "lazy")]
+use crate::traits::{FitLazy, TransformLazy};
 use crate::util::{replace_f64_column, require_f64_columns};
 
 /// Standardize features by removing the mean and scaling to unit variance.
@@ -49,6 +53,12 @@ struct ScaleParam {
 }
 
 impl StandardScaler {
+    /// Drop the fitted state so a failed fit cannot reuse stale parameters.
+    fn reset_fit(&mut self) {
+        self.fitted = false;
+        self.params = None;
+    }
+
     /// Create a new `StandardScaler`.
     ///
     /// Both centering and scaling are enabled by default.
@@ -84,8 +94,7 @@ impl Fit<DataFrame> for StandardScaler {
     type Output = ();
 
     fn fit(&mut self, x: DataFrame) -> Result<()> {
-        self.fitted = false;
-        self.params = None;
+        self.reset_fit();
 
         let n_cols = x.width();
         if x.height() == 0 || n_cols == 0 {
@@ -216,6 +225,53 @@ impl Transform<DataFrame> for StandardScaler {
     }
 }
 
+#[cfg(feature = "lazy")]
+impl FitLazy for StandardScaler {
+    type Output = ();
+
+    fn fit_lazy(&mut self, x: LazyFrame) -> Result<()> {
+        self.reset_fit();
+        let df = collect_fit_frame(x, "StandardScaler")?;
+        self.fit(df)
+    }
+}
+
+#[cfg(feature = "lazy")]
+impl TransformLazy for StandardScaler {
+    type Output = LazyFrame;
+
+    /// Append `(col - mean) / std` for every fitted column to the plan.
+    /// Nulls stay null, and no data is collected.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::NotFitted` if called before fitting, and
+    /// `Error::InvalidInput` if a fitted column is missing or is not `Float64`.
+    fn transform_lazy(&self, x: LazyFrame) -> Result<LazyFrame> {
+        let params = match &self.params {
+            Some(params) if self.fitted => params,
+            _ => {
+                return Err(Error::NotFitted(
+                    "StandardScaler has not been fitted. \
+                     Call .fit(dataframe) or .fit_lazy(lazy_frame) before .transform_lazy()."
+                        .into(),
+                ));
+            }
+        };
+        let mut out = x;
+        require_lazy_f64_columns(
+            &mut out,
+            params.iter().map(|p| p.name.as_str()),
+            "StandardScaler",
+        )?;
+        for p in params {
+            let scaled = (col(p.name.as_str()) - lit(p.mean)) / lit(p.std);
+            out = out.with_column(scaled.alias(p.name.as_str()));
+        }
+        Ok(out)
+    }
+}
+
 impl InverseTransform<DataFrame> for StandardScaler {
     type Output = DataFrame;
 
@@ -279,6 +335,12 @@ struct MinMaxParam {
 }
 
 impl MinMaxScaler {
+    /// Drop the fitted state so a failed fit cannot reuse stale parameters.
+    fn reset_fit(&mut self) {
+        self.fitted = false;
+        self.params = None;
+    }
+
     /// Create a new `MinMaxScaler` that scales to `[0, 1]`.
     pub fn new() -> Self {
         Self {
@@ -305,8 +367,7 @@ impl Fit<DataFrame> for MinMaxScaler {
     type Output = ();
 
     fn fit(&mut self, x: DataFrame) -> Result<()> {
-        self.fitted = false;
-        self.params = None;
+        self.reset_fit();
 
         if x.height() == 0 || x.width() == 0 {
             return Err(Error::InvalidInput(
@@ -399,6 +460,54 @@ impl Transform<DataFrame> for MinMaxScaler {
             })?;
         }
 
+        Ok(out)
+    }
+}
+
+#[cfg(feature = "lazy")]
+impl FitLazy for MinMaxScaler {
+    type Output = ();
+
+    fn fit_lazy(&mut self, x: LazyFrame) -> Result<()> {
+        self.reset_fit();
+        let df = collect_fit_frame(x, "MinMaxScaler")?;
+        self.fit(df)
+    }
+}
+
+#[cfg(feature = "lazy")]
+impl TransformLazy for MinMaxScaler {
+    type Output = LazyFrame;
+
+    /// Append `(col - min) * scale + feature_range.0` for every fitted column
+    /// to the plan. Nulls stay null, and no data is collected.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::NotFitted` if called before fitting, and
+    /// `Error::InvalidInput` if a fitted column is missing or is not `Float64`.
+    fn transform_lazy(&self, x: LazyFrame) -> Result<LazyFrame> {
+        let params = match &self.params {
+            Some(params) if self.fitted => params,
+            _ => {
+                return Err(Error::NotFitted(
+                    "MinMaxScaler has not been fitted. \
+                     Call .fit(dataframe) or .fit_lazy(lazy_frame) before .transform_lazy()."
+                        .into(),
+                ));
+            }
+        };
+        let r_min = self.feature_range.0;
+        let mut out = x;
+        require_lazy_f64_columns(
+            &mut out,
+            params.iter().map(|p| p.name.as_str()),
+            "MinMaxScaler",
+        )?;
+        for p in params {
+            let scaled = ((col(p.name.as_str()) - lit(p.min)) * lit(p.scale)) + lit(r_min);
+            out = out.with_column(scaled.alias(p.name.as_str()));
+        }
         Ok(out)
     }
 }

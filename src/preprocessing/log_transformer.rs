@@ -25,8 +25,12 @@ use polars::prelude::*;
 
 use crate::traits::FeatureNamesOut;
 use crate::traits::inverse::{HasInverse, InverseTransform};
+#[cfg(feature = "lazy")]
+use crate::traits::lazy::{collect_fit_frame, require_lazy_f64_columns};
 use crate::traits::output_names::{ensure_required_present, identity_names};
 use crate::traits::{Error, Fit, Result, Transform};
+#[cfg(feature = "lazy")]
+use crate::traits::{FitLazy, TransformLazy};
 use crate::util::{numeric_f64_columns, replace_f64_column};
 
 /// The logarithmic transformation to apply.
@@ -335,6 +339,58 @@ impl Transform<DataFrame> for LogTransformer {
             })?;
         }
 
+        Ok(out)
+    }
+}
+
+#[cfg(feature = "lazy")]
+impl FitLazy for LogTransformer {
+    type Output = ();
+
+    fn fit_lazy(&mut self, x: LazyFrame) -> Result<()> {
+        self.reset_fit();
+        let df = collect_fit_frame(x, "LogTransformer")?;
+        self.fit(df)
+    }
+}
+
+#[cfg(feature = "lazy")]
+impl TransformLazy for LogTransformer {
+    type Output = LazyFrame;
+
+    /// Append the logarithm of every fitted column to the plan, using the
+    /// same method as the eager `transform`. Nulls stay null.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::NotFitted` if called before fitting, and
+    /// `Error::InvalidInput` if a fitted column is missing or is not `Float64`.
+    fn transform_lazy(&self, x: LazyFrame) -> Result<LazyFrame> {
+        if !self.fitted {
+            return Err(Error::NotFitted(
+                "LogTransformer has not been fitted. \
+                 Call .fit(dataframe) or .fit_lazy(lazy_frame) before .transform_lazy()."
+                    .into(),
+            ));
+        }
+
+        let mut out = x;
+        require_lazy_f64_columns(
+            &mut out,
+            self.fitted_columns.iter().map(|s| s.as_str()),
+            "LogTransformer",
+        )?;
+        for name in &self.fitted_columns {
+            let value = col(name.as_str());
+            let logged = match self.method {
+                LogMethod::Ln => value.log(lit(std::f64::consts::E)),
+                LogMethod::Log1p => value.log1p(),
+                LogMethod::Log2 => value.log(lit(2.0)),
+                LogMethod::Log10 => value.log(lit(10.0)),
+                LogMethod::LogBase(b) => value.log(lit(b)),
+            };
+            out = out.with_column(logged.alias(name.as_str()));
+        }
         Ok(out)
     }
 }

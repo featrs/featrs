@@ -75,6 +75,8 @@ pub mod prelude {
     pub use crate::pipeline::ConditionalPipeline;
     pub use crate::pipeline::DataFrameTransformer;
     pub use crate::pipeline::FeatureUnion;
+    #[cfg(feature = "lazy")]
+    pub use crate::pipeline::LazyPipeline;
     pub use crate::pipeline::Pipeline;
     pub use crate::pipeline::column_transformer::Remainder;
     pub use crate::preprocessing::auto_imputer::{
@@ -150,6 +152,8 @@ pub mod prelude {
         validate_schema,
     };
     pub use crate::traits::{Error, Fit, FitSupervised, FitTransform, Result, Transform};
+    #[cfg(feature = "lazy")]
+    pub use crate::traits::{FitLazy, TransformLazy};
 }
 
 // --- Shallow re-exports at crate root ---

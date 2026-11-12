@@ -13,11 +13,15 @@ pub mod cached_pipeline;
 pub mod column_transformer;
 pub mod conditional_pipeline;
 pub mod feature_union;
+#[cfg(feature = "lazy")]
+pub mod lazy_pipeline;
 
 pub use cached_pipeline::CachedPipeline;
 pub use column_transformer::ColumnTransformer;
 pub use conditional_pipeline::ConditionalPipeline;
 pub use feature_union::FeatureUnion;
+#[cfg(feature = "lazy")]
+pub use lazy_pipeline::{LazyPipeline, LazyTransformer};
 
 use crate::traits::{Error, FeatureNamesOut, Fit, Result, Transform};
 use polars::prelude::*;

@@ -39,10 +39,14 @@
 use thiserror::Error;
 
 pub mod inverse;
+#[cfg(feature = "lazy")]
+pub mod lazy;
 pub mod output_names;
 pub mod schema;
 
 pub use inverse::{HasInverse, InverseTransform};
+#[cfg(feature = "lazy")]
+pub use lazy::{FitLazy, TransformLazy};
 pub use output_names::FeatureNamesOut;
 pub use schema::{
     ColumnRequirement, RequiresSchema, SchemaSpec, SchemaViolation, check_schema, validate_schema,
