@@ -66,6 +66,27 @@ jobs:
       - name: Test
         run: cargo test
 
+  build-test-lazy:
+    name: Build & Test (lazy feature)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: stable-lazy
+
+      - name: Build
+        run: cargo build --features lazy
+
+      - name: Test
+        run: cargo test --features lazy
+
   docs:
     name: Rustdoc
     runs-on: ubuntu-latest
