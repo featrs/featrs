@@ -12,7 +12,7 @@ use crate::traits::FeatureNamesOut;
 use crate::traits::output_names::{
     ensure_fitted, ensure_required_present, ensure_unique_names, subset_names,
 };
-use crate::traits::schema::{ColumnRequirement, RequiresSchema, SchemaSpec};
+use crate::traits::schema::{RequiresSchema, SchemaSpec};
 use crate::traits::{Error, Fit, Result, Transform};
 use polars::prelude::*;
 use std::collections::{HashMap, HashSet};
@@ -230,6 +230,10 @@ impl Fit<DataFrame> for OneHotEncoder {
         let mut cats = Vec::new();
 
         for col in x.columns() {
+            // Non-string columns are ignored; only String columns are encoded.
+            if col.dtype() != &DataType::String {
+                continue;
+            }
             let name = col.name().to_string();
             let unique = column_unique_strings(col)?;
 
@@ -1228,8 +1232,8 @@ impl Transform<DataFrame> for BinaryEncoder {
     }
 }
 
-/// `OneHotEncoder::fit` reads every column as `String`; after fitting, the
-/// columns it learned must still be there.
+/// `OneHotEncoder::fit` ignores non-`String` columns and requires at least one
+/// `String` column; after fitting, the columns it learned must still be there.
 ///
 /// The fitted spec lists every fitted column, including one that
 /// [`drop_first`](OneHotEncoder::drop_first) leaves with no output column, so
@@ -1243,19 +1247,9 @@ impl RequiresSchema for OneHotEncoder {
                     .iter()
                     .map(|c| (c.column.clone(), DataType::String)),
             ),
-            None => SchemaSpec {
-                required_columns: vec![
-                    ColumnRequirement::AllDtype {
-                        dtype: DataType::String,
-                    },
-                    // A zero-column frame has no offending column for
-                    // `AllDtype`, yet `fit` cannot encode it.
-                    ColumnRequirement::Dtype {
-                        dtype: DataType::String,
-                        min_count: 1,
-                    },
-                ],
-            },
+            // Extra columns of other dtypes are allowed: `fit` skips them.
+            // A frame with no `String` column cannot be encoded.
+            None => SchemaSpec::string_columns(1),
         }
     }
 }
@@ -2742,25 +2736,85 @@ mod tests {
     }
 
     #[test]
-    fn test_one_hot_encoder_requires_all_string_columns() {
+    fn test_one_hot_encoder_skips_non_string_columns() {
+        let color = Column::from(Series::new("color".into(), &["red", "blue"]));
+        let num = Column::from(Series::new("num".into(), &[1_i32, 2]));
+        let df = DataFrame::new(2, vec![color, num]).unwrap();
+
+        let mut enc = OneHotEncoder::new();
+        enc.fit(df.clone()).unwrap();
+        let result = enc.transform(df).unwrap();
+
+        // Only the string column is encoded; the numeric column is ignored.
+        assert_eq!(
+            result
+                .get_column_names()
+                .iter()
+                .map(|name| name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["color_blue", "color_red"]
+        );
+        let blue: Vec<f64> = result
+            .column("color_blue")
+            .unwrap()
+            .f64()
+            .unwrap()
+            .iter()
+            .flatten()
+            .collect();
+        let red: Vec<f64> = result
+            .column("color_red")
+            .unwrap()
+            .f64()
+            .unwrap()
+            .iter()
+            .flatten()
+            .collect();
+        assert_eq!(blue, vec![0.0, 1.0]);
+        assert_eq!(red, vec![1.0, 0.0]);
+    }
+
+    #[test]
+    fn test_one_hot_encoder_no_string_columns_errors() {
+        let num = Column::from(Series::new("num".into(), &[1_i32, 2]));
+        let df = DataFrame::new(2, vec![num]).unwrap();
+
+        let mut enc = OneHotEncoder::new();
+        let err = enc.fit(df).unwrap_err();
+        match err {
+            Error::InvalidInput(msg) => {
+                assert!(msg.contains("no string columns"), "got: {msg}");
+            }
+            other => panic!("expected Error::InvalidInput, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_one_hot_encoder_requires_a_string_column() {
         use crate::traits::schema::validate_schema;
 
         let spec = OneHotEncoder::new().required_schema();
+        assert_eq!(spec, SchemaSpec::string_columns(1));
         assert!(validate_schema(&spec, &make_categorical_df()).is_ok());
 
-        // `fit` reads every column as String, so one numeric column is a
-        // schema violation, not something to skip.
+        // Non-string columns are ignored, matching `fit`, so a mixed frame
+        // with at least one String column satisfies the spec.
         let x = Column::from(Series::new("x".into(), &[1.0f64, 2.0, 3.0, 4.0]));
         let mut mixed = make_categorical_df();
         mixed.with_column(x).unwrap();
-        let msg = validate_schema(&spec, &mixed).unwrap_err().to_string();
+        assert!(validate_schema(&spec, &mixed).is_ok());
+
+        let numeric = DataFrame::new(
+            2,
+            vec![Column::from(Series::new("x".into(), &[1.0f64, 2.0]))],
+        )
+        .unwrap();
+        let msg = validate_schema(&spec, &numeric).unwrap_err().to_string();
         assert!(
-            msg.contains("Dtype mismatch on 'x' (expected: String, actual: Float64)"),
+            msg.contains("Require >= 1 String columns, found 0"),
             "message: {msg}"
         );
 
-        // A frame with no columns has no offender for the all-dtype check, so
-        // the minimum-count requirement is what catches it.
         let empty = DataFrame::empty();
         assert!(validate_schema(&spec, &empty).is_err());
 
