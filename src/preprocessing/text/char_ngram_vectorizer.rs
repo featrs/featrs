@@ -33,9 +33,9 @@ pub enum Analyzer {
 /// column per term, named after the n-gram itself — a term can be whitespace
 /// only, e.g. `" "` under `ngram_range(1, 1)`. Unknown n-grams are dropped. The
 /// input column is not carried over, so the output width equals the vocabulary
-/// size. A vocabulary that ends up empty is returned as a 0x0 frame (polars
-/// cannot represent columns-less frames with a row count), so a downstream
-/// pipeline step receives an empty frame rather than one row per document.
+/// size. A vocabulary that ends up empty is returned as a frame with no
+/// columns but one row per document, so the output stays row-aligned with the
+/// input.
 /// `null` cells contribute no n-grams but still count as documents for the
 /// `min_df`/`max_df` denominators.
 ///
@@ -375,9 +375,8 @@ impl Transform<DataFrame> for CharacterNGramVectorizer {
     /// Count the fitted vocabulary's n-grams per document.
     ///
     /// Returns a frame of `Float64` counts (one column per term, one row per
-    /// document). When the vocabulary is empty the result is a 0x0 frame, since
-    /// polars drops the height of a frame without columns — downstream steps
-    /// receive an empty frame rather than one row per document.
+    /// document). When the vocabulary is empty the result has no columns but
+    /// still one row per document.
     fn transform(&self, x: DataFrame) -> Result<DataFrame> {
         let not_fitted = || {
             Error::NotFitted(
@@ -412,9 +411,9 @@ impl Transform<DataFrame> for CharacterNGramVectorizer {
         })?;
 
         if vocabulary.is_empty() {
-            // polars ignores `height` for a frame without columns, so an empty
-            // vocabulary can only be represented by a 0x0 frame.
-            return Ok(DataFrame::empty());
+            // Keep one (empty) row per document so the output stays
+            // row-aligned with the input.
+            return Ok(DataFrame::empty_with_height(x.height()));
         }
 
         let n_rows = x.height();
@@ -802,7 +801,8 @@ mod tests {
     }
 
     /// An empty vocabulary (no document yields an n-gram, or every term is
-    /// filtered out) is returned as a 0x0 frame.
+    /// filtered out) is returned as a frame with no columns but one row per
+    /// document.
     #[test]
     fn test_empty_vocabulary_returns_empty_frame() {
         let df = make_df(&["", "", "a"]);
@@ -812,7 +812,7 @@ mod tests {
         v.fit(df.clone()).unwrap();
         let out = v.transform(df).unwrap();
         assert_eq!(out.width(), 0);
-        assert_eq!(out.height(), 0);
+        assert_eq!(out.height(), 3);
 
         // The column is still validated even when the vocabulary is empty.
         let other =
@@ -831,7 +831,9 @@ mod tests {
             .ngram_range(2, 2)
             .max_df(0.5);
         v.fit(df.clone()).unwrap();
-        assert_eq!(v.transform(df).unwrap().width(), 0);
+        let out = v.transform(df).unwrap();
+        assert_eq!(out.width(), 0);
+        assert_eq!(out.height(), 2);
     }
 
     /// Every invalid configuration surfaces as `Error::InvalidInput` at fit.

@@ -620,6 +620,29 @@ mod tests {
     }
 
     #[test]
+    fn test_feature_union_skips_empty_vocabulary_vectorizer() {
+        // An empty vocabulary keeps the input height, so the union takes the
+        // zero-width skip path instead of reporting a row-count mismatch.
+        use crate::preprocessing::text::count_vectorizer::CountVectorizer;
+        let df = DataFrame::new(
+            3,
+            vec![Column::from(Series::new("text".into(), &["", "  ", "the"]))],
+        )
+        .unwrap();
+        let vectorizer = CountVectorizer::new()
+            .column("text")
+            .stop_words(vec!["the".to_string()]);
+        let mut union = FeatureUnion::new(vec![("vec".into(), Box::new(vectorizer))]).unwrap();
+
+        union.fit(df.clone()).unwrap();
+        let err = union.transform(df).unwrap_err();
+        assert!(
+            err.to_string().contains("produced no output columns"),
+            "got {err}"
+        );
+    }
+
+    #[test]
     fn test_feature_union_fit_error_names_transformer() {
         // StandardScaler rejects a frame without Float64 columns.
         let int_col = Column::from(Series::new("x".into(), &[1_i64, 2, 3]));
