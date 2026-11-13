@@ -305,10 +305,15 @@ impl Default for TFIDFVectorizer {
 ///
 /// The inner vectorizer words its messages for itself; they are forwarded
 /// under this transformer's name, so a caller is never told to configure a
-/// `CountVectorizer` it never created.
+/// `CountVectorizer` it never created. Only the leading transformer name is
+/// rewritten: the rest of the message can quote caller-supplied column names
+/// and regex patterns, which must be reported verbatim.
 fn relabel(error: Error) -> Error {
     fn rename(message: String) -> String {
-        message.replace("CountVectorizer", "TFIDFVectorizer")
+        match message.strip_prefix("CountVectorizer") {
+            Some(rest) => format!("TFIDFVectorizer{rest}"),
+            None => message,
+        }
     }
     match error {
         Error::InvalidInput(message) => Error::InvalidInput(rename(message)),
@@ -1204,5 +1209,36 @@ mod tests {
             DataFrame::new(1, vec![Column::from(Series::new("text".into(), &[1i32]))]).unwrap();
         let err = v.transform(numeric).unwrap_err().to_string();
         assert!(err.contains("expected String"), "{err}");
+    }
+
+    /// Relabelling renames only the inner transformer, never caller-supplied
+    /// column names or regex patterns quoted in the message.
+    #[test]
+    fn test_relabel_preserves_caller_strings() {
+        let column = "my_CountVectorizer_col";
+        let mut v = TFIDFVectorizer::new().column(column);
+        let err = v.fit(make_df(&["cat dog"])).unwrap_err().to_string();
+        assert!(err.contains("TFIDFVectorizer.fit"), "{err}");
+        assert!(err.contains(&format!("'{column}'")), "{err}");
+        assert!(!err.contains("my_TFIDFVectorizer_col"), "{err}");
+
+        let mut v = TFIDFVectorizer::new()
+            .column("text")
+            .tokenizer(Tokenizer::WordRegex("CountVectorizer(".into()));
+        let err = v.fit(make_df(&["cat dog"])).unwrap_err().to_string();
+        assert!(err.contains("TFIDFVectorizer: invalid regex"), "{err}");
+        assert!(err.contains("'CountVectorizer('"), "{err}");
+
+        let train = DataFrame::new(
+            1,
+            vec![Column::from(Series::new(column.into(), &["cat dog"]))],
+        )
+        .unwrap();
+        let mut v = TFIDFVectorizer::new().column(column);
+        v.fit(train).unwrap();
+        let err = v.transform(make_df(&["cat"])).unwrap_err().to_string();
+        assert!(err.contains("TFIDFVectorizer.transform"), "{err}");
+        assert!(err.contains(&format!("'{column}'")), "{err}");
+        assert!(!err.contains("my_TFIDFVectorizer_col"), "{err}");
     }
 }
