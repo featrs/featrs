@@ -547,7 +547,7 @@ impl FeatureNamesOut for TFIDFVectorizer {
                     .into(),
             )
         })?;
-        vectorizer.feature_names_out(input_columns)
+        vectorizer.feature_names_out(input_columns).map_err(relabel)
     }
 }
 
@@ -1240,5 +1240,12 @@ mod tests {
         assert!(err.contains("TFIDFVectorizer.transform"), "{err}");
         assert!(err.contains(&format!("'{column}'")), "{err}");
         assert!(!err.contains("my_TFIDFVectorizer_col"), "{err}");
+
+        let err = v
+            .feature_names_out(&["other".to_string()])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("TFIDFVectorizer.feature_names_out"), "{err}");
+        assert!(err.contains(&format!("'{column}'")), "{err}");
     }
 }
