@@ -81,6 +81,10 @@ use std::collections::HashMap;
 ///   [`Error::InvalidInput`] otherwise.
 /// - All statistics are accumulated as running means (never raw sums), so
 ///   very large target values (e.g. `f64::MAX`) do not overflow to infinity.
+///   This includes mixed-sign extremes such as `[f64::MAX, -f64::MAX]` (whose
+///   mean is `0.0`): the running-mean update never relies on the raw difference
+///   of two opposite-sign extreme values, so such a column is accepted instead
+///   of being rejected as non-finite.
 ///
 /// # Example
 ///
@@ -257,6 +261,25 @@ impl Default for LeaveOneOutEncoder {
     }
 }
 
+/// Compute `(a - b) / n` for finite `a` and `b` without overflowing.
+///
+/// The running-mean update `mean += (v - mean) / n` and the leave-one-out
+/// base `mean + (mean - y_i) / n_excl` both need this quantity. The raw
+/// difference `a - b` overflows to infinity when the operands are extreme and
+/// of opposite sign (e.g. `f64::MAX - -f64::MAX`) even though the scaled
+/// result is representable. The direct form is used whenever it is finite, so
+/// ordinary inputs take exactly the same arithmetic path as before; only an
+/// overflowing difference falls back to scaling each operand first, where
+/// `|a / n| + |b / n| <= f64::MAX` for `n >= 2`.
+fn scaled_difference(a: f64, b: f64, n: f64) -> f64 {
+    let direct = (a - b) / n;
+    if direct.is_finite() {
+        direct
+    } else {
+        a / n - b / n
+    }
+}
+
 impl FitSupervised<DataFrame, DataFrame> for LeaveOneOutEncoder {
     type Output = ();
 
@@ -314,14 +337,16 @@ impl FitSupervised<DataFrame, DataFrame> for LeaveOneOutEncoder {
 
         // Global target mean over all usable (non-null, finite) rows,
         // accumulated incrementally so running sums of very large target
-        // values cannot overflow to infinity.
+        // values cannot overflow to infinity. The update goes through
+        // `scaled_difference` so opposite-sign extremes (`f64::MAX` after
+        // `-f64::MAX`) do not overflow in `v - global_mean` either.
         let y_vals: Vec<Option<f64>> = y_ca.iter().collect();
         let mut global_mean = 0.0;
         let mut global_n = 0u64;
         for opt in &y_vals {
             if let Some(v) = opt.filter(|v| v.is_finite()) {
                 global_n += 1;
-                global_mean += (v - global_mean) / global_n as f64;
+                global_mean += scaled_difference(v, global_mean, global_n as f64);
             }
         }
         if global_n == 0 {
@@ -360,7 +385,8 @@ impl FitSupervised<DataFrame, DataFrame> for LeaveOneOutEncoder {
 
             // Per-category running mean and count over usable (finite,
             // non-null) target rows, accumulated incrementally so large
-            // targets cannot overflow a sum.
+            // targets cannot overflow a sum (see `scaled_difference` for the
+            // mixed-sign case).
             let mut stats: HashMap<String, (f64, u64)> = HashMap::new();
             for (opt_cat, opt_y) in ca.iter().zip(y_vals.iter()) {
                 let (Some(cat), Some(v)) = (opt_cat, opt_y) else {
@@ -371,7 +397,7 @@ impl FitSupervised<DataFrame, DataFrame> for LeaveOneOutEncoder {
                 }
                 let (mean, n) = stats.entry(cat.to_string()).or_insert((0.0, 0u64));
                 *n += 1;
-                *mean += (v - *mean) / *n as f64;
+                *mean += scaled_difference(*v, *mean, *n as f64);
             }
 
             // Full-sample per-category means, used at transform time for data
@@ -417,19 +443,26 @@ impl FitSupervised<DataFrame, DataFrame> for LeaveOneOutEncoder {
                     };
                     if n_excl >= 1 {
                         // Mean of the leave-one-out set, computed without
-                        // forming an overflowing category sum.
+                        // forming an overflowing category sum or an
+                        // overflowing `mean - v` difference.
                         let base = match opt_y.filter(|v| v.is_finite()) {
-                            Some(v) => mean + (mean - v) / n_excl as f64,
+                            Some(v) => (mean + scaled_difference(mean, v, n_excl as f64))
+                                .clamp(-f64::MAX, f64::MAX),
                             None => mean,
                         };
                         // Smooth toward the global mean via a convex
                         // combination (see the mapping above).
                         let w = n_excl as f64 / (n_excl as f64 + self.alpha);
                         let loo = w * base + (1.0 - w) * global_mean;
-                        if loo.is_finite() {
-                            Some(loo)
-                        } else {
+                        // The true leave-one-out mean of finite targets lies
+                        // within [-f64::MAX, f64::MAX]. A non-finite result
+                        // can only come from rounding past that bound, so
+                        // clamp it instead of collapsing the row to the
+                        // global mean.
+                        if loo.is_nan() {
                             Some(global_mean)
+                        } else {
+                            Some(loo.clamp(-f64::MAX, f64::MAX))
                         }
                     } else {
                         Some(global_mean)
@@ -1111,6 +1144,154 @@ mod tests {
             .collect();
         assert!(vals[0].is_finite());
         assert!(vals[1].is_finite());
+    }
+
+    #[test]
+    fn test_scaled_difference_matches_direct_form_and_survives_overflow() {
+        // Ordinary operands take the direct path bit-for-bit.
+        assert_eq!(scaled_difference(10.0, 4.0, 2.0), (10.0 - 4.0) / 2.0);
+        assert_eq!(scaled_difference(-1.5, 2.5, 4.0), (-1.5 - 2.5) / 4.0);
+        // Opposite-sign extremes overflow in `a - b` but not after scaling.
+        assert_eq!(scaled_difference(f64::MAX, -f64::MAX, 2.0), f64::MAX);
+        assert_eq!(scaled_difference(-f64::MAX, f64::MAX, 2.0), -f64::MAX);
+        assert_eq!(scaled_difference(-f64::MAX, f64::MAX, 4.0), -f64::MAX / 2.0);
+    }
+
+    #[test]
+    fn test_mixed_sign_extreme_targets_do_not_overflow() {
+        // `f64::MAX - (-f64::MAX)` overflows to infinity, so a naive running
+        // mean (`mean += (v - mean) / n`) rejects this frame even though its
+        // true mean (0.0) and every leave-one-out mean are representable.
+        let cat = Column::from(Series::new("cat".into(), &["a", "a"]));
+        let x = DataFrame::new(2, vec![cat]).unwrap();
+        let target = Column::from(Series::new("y".into(), &[f64::MAX, -f64::MAX]));
+        let y = DataFrame::new(2, vec![target]).unwrap();
+
+        let mut enc = LeaveOneOutEncoder::new();
+        enc.fit(x.clone(), y).unwrap();
+
+        // Each training row is encoded with the *other* row's target.
+        let result = enc.transform(x).unwrap();
+        let vals: Vec<f64> = result
+            .column("cat")
+            .unwrap()
+            .f64()
+            .unwrap()
+            .iter()
+            .flatten()
+            .collect();
+        assert_eq!(vals, vec![-f64::MAX, f64::MAX]);
+
+        // Full-sample mean of "a" and the global mean are both exactly 0.0.
+        let new_cat = Column::from(Series::new("cat".into(), &["a", "zzz"]));
+        let new_data = DataFrame::new(2, vec![new_cat]).unwrap();
+        let unseen = enc.transform_unseen(new_data).unwrap();
+        let unseen_vals: Vec<f64> = unseen
+            .column("cat")
+            .unwrap()
+            .f64()
+            .unwrap()
+            .iter()
+            .flatten()
+            .collect();
+        assert_eq!(unseen_vals, vec![0.0, 0.0]);
+    }
+
+    #[test]
+    fn test_mixed_sign_extreme_leave_one_out_base_does_not_overflow() {
+        // The leave-one-out base `mean + (mean - y_i) / n_excl` has the same
+        // hazard: with targets [MAX, -MAX, -MAX, 0] the category mean is
+        // -MAX/4, so `mean - MAX` overflows for row 0. A non-finite base would
+        // silently collapse that row to the global mean (-MAX/4) instead of
+        // its true leave-one-out value (-MAX - MAX + 0) / 3 = -2MAX/3.
+        let cat = Column::from(Series::new("cat".into(), &["a", "a", "a", "a"]));
+        let x = DataFrame::new(4, vec![cat]).unwrap();
+        let target = Column::from(Series::new(
+            "y".into(),
+            &[f64::MAX, -f64::MAX, -f64::MAX, 0.0],
+        ));
+        let y = DataFrame::new(4, vec![target]).unwrap();
+
+        let mut enc = LeaveOneOutEncoder::new();
+        enc.fit(x.clone(), y).unwrap();
+        let result = enc.transform(x).unwrap();
+        let vals: Vec<f64> = result
+            .column("cat")
+            .unwrap()
+            .f64()
+            .unwrap()
+            .iter()
+            .flatten()
+            .collect();
+        // Tolerances are relative to f64::MAX: the running mean carries a few
+        // ulps of rounding error at this magnitude.
+        let tol = f64::MAX * 1e-12;
+        // row 0 leaves {-MAX, -MAX, 0} -> -2MAX/3.
+        assert_relative_eq!(vals[0], -f64::MAX / 3.0 * 2.0, epsilon = tol);
+        // rows 1 and 2 leave {MAX, -MAX, 0} -> 0.0.
+        assert_relative_eq!(vals[1], 0.0, epsilon = tol);
+        assert_relative_eq!(vals[2], 0.0, epsilon = tol);
+        // row 3 leaves {MAX, -MAX, -MAX} -> -MAX/3.
+        assert_relative_eq!(vals[3], -f64::MAX / 3.0, epsilon = tol);
+    }
+
+    #[test]
+    fn test_same_sign_extreme_leave_one_out_base_clamps_to_max() {
+        // The running mean rounds the base slightly past MAX for the small
+        // row, whose leave-one-out set is {MAX, MAX}. Clamping keeps MAX
+        // instead of silently returning the global mean.
+        let cat = Column::from(Series::new("cat".into(), &["a", "a", "a"]));
+        let x = DataFrame::new(3, vec![cat]).unwrap();
+        let target = Column::from(Series::new(
+            "y".into(),
+            &[f64::MAX, f64::MAX, 0.02 * f64::MAX],
+        ));
+        let y = DataFrame::new(3, vec![target]).unwrap();
+
+        let mut enc = LeaveOneOutEncoder::new();
+        enc.fit(x.clone(), y).unwrap();
+        let result = enc.transform(x).unwrap();
+        let vals: Vec<f64> = result
+            .column("cat")
+            .unwrap()
+            .f64()
+            .unwrap()
+            .iter()
+            .flatten()
+            .collect();
+        let tol = f64::MAX * 1e-12;
+        // rows 0 and 1 leave {MAX, 0.02MAX} -> 0.51MAX.
+        assert_relative_eq!(vals[0], 0.51 * f64::MAX, epsilon = tol);
+        assert_relative_eq!(vals[1], 0.51 * f64::MAX, epsilon = tol);
+        assert_eq!(vals[2], f64::MAX);
+    }
+
+    #[test]
+    fn test_same_sign_extreme_base_clamps_before_smoothing() {
+        // With alpha = 1 the convex weight is 2/3. Clamping the base before
+        // smoothing keeps the global-mean term; clamping only the smoothed
+        // result would return MAX and discard it.
+        let cat = Column::from(Series::new("cat".into(), &["a", "a", "a"]));
+        let x = DataFrame::new(3, vec![cat]).unwrap();
+        let target = Column::from(Series::new(
+            "y".into(),
+            &[f64::MAX, f64::MAX, 0.02 * f64::MAX],
+        ));
+        let y = DataFrame::new(3, vec![target]).unwrap();
+
+        let mut enc = LeaveOneOutEncoder::new().alpha(1.0);
+        enc.fit(x.clone(), y).unwrap();
+        let result = enc.transform(x).unwrap();
+        let vals: Vec<f64> = result
+            .column("cat")
+            .unwrap()
+            .f64()
+            .unwrap()
+            .iter()
+            .flatten()
+            .collect();
+        let expected = (2.0 / 3.0) * f64::MAX + (1.0 / 3.0) * (f64::MAX / 3.0 * 2.02);
+        assert_relative_eq!(vals[2], expected, epsilon = f64::MAX * 1e-12);
     }
 
     #[test]
