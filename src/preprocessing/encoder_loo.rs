@@ -446,7 +446,8 @@ impl FitSupervised<DataFrame, DataFrame> for LeaveOneOutEncoder {
                         // forming an overflowing category sum or an
                         // overflowing `mean - v` difference.
                         let base = match opt_y.filter(|v| v.is_finite()) {
-                            Some(v) => mean + scaled_difference(mean, v, n_excl as f64),
+                            Some(v) => (mean + scaled_difference(mean, v, n_excl as f64))
+                                .clamp(-f64::MAX, f64::MAX),
                             None => mean,
                         };
                         // Smooth toward the global mean via a convex
@@ -1263,6 +1264,34 @@ mod tests {
         assert_relative_eq!(vals[0], 0.51 * f64::MAX, epsilon = tol);
         assert_relative_eq!(vals[1], 0.51 * f64::MAX, epsilon = tol);
         assert_eq!(vals[2], f64::MAX);
+    }
+
+    #[test]
+    fn test_same_sign_extreme_base_clamps_before_smoothing() {
+        // With alpha = 1 the convex weight is 2/3. Clamping the base before
+        // smoothing keeps the global-mean term; clamping only the smoothed
+        // result would return MAX and discard it.
+        let cat = Column::from(Series::new("cat".into(), &["a", "a", "a"]));
+        let x = DataFrame::new(3, vec![cat]).unwrap();
+        let target = Column::from(Series::new(
+            "y".into(),
+            &[f64::MAX, f64::MAX, 0.02 * f64::MAX],
+        ));
+        let y = DataFrame::new(3, vec![target]).unwrap();
+
+        let mut enc = LeaveOneOutEncoder::new().alpha(1.0);
+        enc.fit(x.clone(), y).unwrap();
+        let result = enc.transform(x).unwrap();
+        let vals: Vec<f64> = result
+            .column("cat")
+            .unwrap()
+            .f64()
+            .unwrap()
+            .iter()
+            .flatten()
+            .collect();
+        let expected = (2.0 / 3.0) * f64::MAX + (1.0 / 3.0) * (f64::MAX / 3.0 * 2.02);
+        assert_relative_eq!(vals[2], expected, epsilon = f64::MAX * 1e-12);
     }
 
     #[test]
