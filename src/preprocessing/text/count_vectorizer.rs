@@ -49,11 +49,10 @@ pub enum Tokenizer {
 /// from the vocabulary are dropped, so the output width is the vocabulary size
 /// and the input column is not carried over.
 ///
-/// A vocabulary that ends up empty is returned as a 0x0 frame (polars cannot
-/// represent columns-less frames with a row count), so a downstream pipeline
-/// step receives an empty frame rather than one row per document. `null` cells
-/// contribute no terms but still count as documents in the `min_df`/`max_df`
-/// denominators.
+/// A vocabulary that ends up empty is returned as a frame with no columns but
+/// one row per document, so the output stays row-aligned with the input.
+/// `null` cells contribute no terms but still count as documents in the
+/// `min_df`/`max_df` denominators.
 ///
 /// The order of the emitted columns is part of the contract: terms are ranked
 /// by corpus frequency (total occurrences, not document frequency), ties are
@@ -418,9 +417,8 @@ impl Transform<DataFrame> for CountVectorizer {
     /// Count the fitted vocabulary's terms per document.
     ///
     /// Returns a frame of `Float64` counts (one column per term, one row per
-    /// document). When the vocabulary is empty the result is a 0x0 frame, since
-    /// polars drops the height of a frame without columns — downstream steps
-    /// receive an empty frame rather than one row per document.
+    /// document). When the vocabulary is empty the result has no columns but
+    /// still one row per document.
     fn transform(&self, x: DataFrame) -> Result<DataFrame> {
         let not_fitted = || {
             Error::NotFitted(
@@ -455,9 +453,9 @@ impl Transform<DataFrame> for CountVectorizer {
         })?;
 
         if vocabulary.is_empty() {
-            // polars ignores `height` for a frame without columns, so an empty
-            // vocabulary can only be represented by a 0x0 frame.
-            return Ok(DataFrame::empty());
+            // Keep one (empty) row per document so the output stays
+            // row-aligned with the input.
+            return Ok(DataFrame::empty_with_height(x.height()));
         }
 
         let regex = compile_tokenizer(&self.tokenizer)?;
@@ -595,7 +593,7 @@ mod tests {
         let (v, df) = fit_on(&corpus, CountVectorizer::new().column("text").min_df(4));
         let out = v.transform(df).unwrap();
         assert_eq!(out.width(), 0);
-        assert_eq!(out.height(), 0);
+        assert_eq!(out.height(), 3);
     }
 
     /// `max_df` filters on the fraction of documents a term appears in; a term
@@ -760,13 +758,14 @@ mod tests {
         assert_eq!(values(&out, "dog"), vec![0.0, 0.0, 0.0, 1.0]);
     }
 
-    /// A corpus with no tokens at all still fits, and transforms to 0x0.
+    /// A corpus with no tokens at all still fits, and transforms to a frame
+    /// with no columns but one row per document.
     #[test]
     fn test_all_empty_corpus_yields_empty_frame() {
         let (v, df) = fit_on(&["", "  \t"], CountVectorizer::new().column("text"));
         let out = v.transform(df).unwrap();
         assert_eq!(out.width(), 0);
-        assert_eq!(out.height(), 0);
+        assert_eq!(out.height(), 2);
 
         // The input column is still validated when the vocabulary is empty.
         let other =

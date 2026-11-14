@@ -97,9 +97,8 @@ pub enum NormMethod {
 /// inverse document frequency is finite.
 ///
 /// A vocabulary that ends up empty — everything filtered out by `min_df`,
-/// `max_df` or `stop_words` — transforms to a 0x0 frame, mirroring
-/// [`CountVectorizer`],
-/// because polars drops the height of a frame without columns.
+/// `max_df` or `stop_words` — transforms to a frame with no columns but one
+/// row per document, mirroring [`CountVectorizer`].
 ///
 /// # Example
 ///
@@ -488,9 +487,9 @@ impl Transform<DataFrame> for TFIDFVectorizer {
         // order, one row per document.
         let counts = vectorizer.transform(x).map_err(relabel)?;
         if counts.width() == 0 {
-            // polars ignores `height` for a frame without columns, so an empty
-            // vocabulary can only be represented by a 0x0 frame.
-            return Ok(DataFrame::empty());
+            // Empty vocabulary: `counts` already has no columns and one row per
+            // document.
+            return Ok(counts);
         }
         if idf.len() != counts.width() {
             return Err(Error::Computation(format!(
@@ -999,13 +998,14 @@ mod tests {
         assert_eq!(names(&v.transform(df).unwrap()), vec!["b", "c"]);
     }
 
-    /// An empty vocabulary transforms to a 0x0 frame.
+    /// An empty vocabulary transforms to a frame with no columns but one row
+    /// per document.
     #[test]
     fn test_empty_vocabulary_yields_an_empty_frame() {
         let (v, df) = fit_on(&["", "  \t"], TFIDFVectorizer::new().column("text"));
         let out = v.transform(df).unwrap();
         assert_eq!(out.width(), 0);
-        assert_eq!(out.height(), 0);
+        assert_eq!(out.height(), 2);
 
         let (v, df) = fit_on(
             &["cat dog"],
@@ -1013,7 +1013,7 @@ mod tests {
         );
         let out = v.transform(df).unwrap();
         assert_eq!(out.width(), 0);
-        assert_eq!(out.height(), 0);
+        assert_eq!(out.height(), 1);
     }
 
     /// A zero-row transform input keeps the vocabulary width.
