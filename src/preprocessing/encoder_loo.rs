@@ -453,10 +453,15 @@ impl FitSupervised<DataFrame, DataFrame> for LeaveOneOutEncoder {
                         // combination (see the mapping above).
                         let w = n_excl as f64 / (n_excl as f64 + self.alpha);
                         let loo = w * base + (1.0 - w) * global_mean;
-                        if loo.is_finite() {
-                            Some(loo)
-                        } else {
+                        // The true leave-one-out mean of finite targets lies
+                        // within [-f64::MAX, f64::MAX]. A non-finite result
+                        // can only come from rounding past that bound, so
+                        // clamp it instead of collapsing the row to the
+                        // global mean.
+                        if loo.is_nan() {
                             Some(global_mean)
+                        } else {
+                            Some(loo.clamp(-f64::MAX, f64::MAX))
                         }
                     } else {
                         Some(global_mean)
@@ -1227,6 +1232,37 @@ mod tests {
         assert_relative_eq!(vals[2], 0.0, epsilon = tol);
         // row 3 leaves {MAX, -MAX, -MAX} -> -MAX/3.
         assert_relative_eq!(vals[3], -f64::MAX / 3.0, epsilon = tol);
+    }
+
+    #[test]
+    fn test_same_sign_extreme_leave_one_out_base_clamps_to_max() {
+        // The running mean rounds the base slightly past MAX for the small
+        // row, whose leave-one-out set is {MAX, MAX}. Clamping keeps MAX
+        // instead of silently returning the global mean.
+        let cat = Column::from(Series::new("cat".into(), &["a", "a", "a"]));
+        let x = DataFrame::new(3, vec![cat]).unwrap();
+        let target = Column::from(Series::new(
+            "y".into(),
+            &[f64::MAX, f64::MAX, 0.02 * f64::MAX],
+        ));
+        let y = DataFrame::new(3, vec![target]).unwrap();
+
+        let mut enc = LeaveOneOutEncoder::new();
+        enc.fit(x.clone(), y).unwrap();
+        let result = enc.transform(x).unwrap();
+        let vals: Vec<f64> = result
+            .column("cat")
+            .unwrap()
+            .f64()
+            .unwrap()
+            .iter()
+            .flatten()
+            .collect();
+        let tol = f64::MAX * 1e-12;
+        // rows 0 and 1 leave {MAX, 0.02MAX} -> 0.51MAX.
+        assert_relative_eq!(vals[0], 0.51 * f64::MAX, epsilon = tol);
+        assert_relative_eq!(vals[1], 0.51 * f64::MAX, epsilon = tol);
+        assert_eq!(vals[2], f64::MAX);
     }
 
     #[test]
