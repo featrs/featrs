@@ -255,14 +255,12 @@ impl Fit<DataFrame> for OneHotEncoder {
         }
 
         // Reject name collisions up front: `transform` emits `{col}_{category}`
-        // for every fitted category, and a generated name equal to an input
-        // column (or another generated name) would silently overwrite data.
-        // Mirror the plan `transform` will produce so the two can never drift.
-        let mut seen: HashSet<String> = x
-            .get_column_names()
-            .iter()
-            .map(|n| n.as_str().to_string())
-            .collect();
+        // for every fitted category, and a generated name equal to a fitted
+        // input column (or another generated name) would silently overwrite
+        // data. Columns skipped above never reach the output, so their names
+        // cannot collide. Mirror the plan `transform` will produce so the two
+        // can never drift.
+        let mut seen: HashSet<String> = cats.iter().map(|c| c.column.clone()).collect();
         for (col, category) in planned_pairs(&cats, self.drop_first) {
             let out_name = format!("{col}_{category}");
             if !seen.insert(out_name.clone()) {
@@ -1444,6 +1442,22 @@ mod tests {
             Error::InvalidInput(msg) => assert!(msg.contains("a_b"), "got: {msg}"),
             other => panic!("expected Error::InvalidInput, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_one_hot_skipped_column_name_does_not_collide() {
+        // "color_red" is an Int32 column that fit skips, so it cannot collide
+        // with the name generated for color's "red" category.
+        let color = Column::from(Series::new("color".into(), &["red", "blue"]));
+        let color_red = Column::from(Series::new("color_red".into(), &[1_i32, 2]));
+        let df = DataFrame::new(2, vec![color, color_red]).unwrap();
+
+        let mut enc = OneHotEncoder::new();
+        enc.fit(df.clone()).unwrap();
+        let result = enc.transform(df).unwrap();
+        let mut names = result.get_column_names();
+        names.sort();
+        assert_eq!(names, vec!["color_blue", "color_red"]);
     }
 
     #[test]
