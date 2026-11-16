@@ -29,6 +29,9 @@ criterion = "0.8"
 [lib]
 name = "featrs"
 path = "src/lib.rs"
+# Keep libtest out of `cargo bench`, so Criterion flags such as
+# `--save-baseline` reach the suites instead of failing in libtest.
+bench = false
 
 [[test]]
 name = "lazyframe_integration"
