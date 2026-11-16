@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Criterion benchmark suites in `benches/` cover the scalers, one-hot encoding,
+  polynomial features, feature hashing, composed pipelines, rolling
+  aggregation, and the statistics kernels the scalers rely on, with hand loops
+  and Polars kernels measured side by side (#21). The default profile divides
+  every row count by ten; `FEATRS_BENCH_PROFILE=full` runs the larger sizes.
+
 ## [0.6.0] - 2026-11-10
 
 **Milestone:** [v0.6.0 - Pipeline Composition & Automation](https://github.com/featrs/featrs/milestone/3)

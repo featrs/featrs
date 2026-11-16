@@ -24,11 +24,47 @@ lazy = ["polars/lazy", "polars/strings", "polars/log"]
 
 [dev-dependencies]
 approx = "0.5"
+criterion = "0.8"
 
 [lib]
 name = "featrs"
 path = "src/lib.rs"
+# Keep libtest out of `cargo bench`, so Criterion flags such as
+# `--save-baseline` reach the suites instead of failing in libtest.
+bench = false
 
 [[test]]
 name = "lazyframe_integration"
 required-features = ["lazy"]
+
+[[bench]]
+name = "encoder"
+harness = false
+
+[[bench]]
+name = "feature_hasher"
+harness = false
+
+[[bench]]
+name = "kernel_compare"
+harness = false
+
+[[bench]]
+name = "normalizer"
+harness = false
+
+[[bench]]
+name = "pipeline"
+harness = false
+
+[[bench]]
+name = "polynomial"
+harness = false
+
+[[bench]]
+name = "scalers"
+harness = false
+
+[[bench]]
+name = "time_series"
+harness = false
