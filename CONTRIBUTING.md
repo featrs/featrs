@@ -25,6 +25,31 @@ cargo test
 4. Add tests in a `#[cfg(test)] mod tests` block
 5. Register the module in the parent `mod.rs`
 
+## Benchmarks
+
+The `benches/` suites cover the preprocessing, pipeline, time-series, and
+statistics paths with Criterion. The default profile divides every row count by
+ten, so a default run stays short on a shared machine.
+
+```bash
+cargo bench                               # CI-sized shapes
+FEATRS_BENCH_PROFILE=full cargo bench     # sizes from issue #21
+cargo bench --bench kernel_compare        # one suite
+```
+
+Bench ids include the shape, so a CI run never compares against a full-size
+baseline. To measure a change against `main`, save a baseline there first:
+
+```bash
+git switch main
+cargo bench -- --save-baseline main
+git switch -
+cargo bench -- --baseline main
+```
+
+Keep new benchmarks at or below the existing sizes. A suite that needs minutes
+belongs behind `FEATRS_BENCH_PROFILE=full`.
+
 ## PR process
 
 1. Branch from `main`: `git checkout -b feat/my-feature`
