@@ -3,7 +3,8 @@
 //! Full degree 3 is rejected by `fit`, because output names do not encode
 //! exponents and `f0^` from `f0^2` collides with `f0^` from `f0^3`. The
 //! degree-3 run uses `interaction_only(true)`, the representable degree-3
-//! path at 92 output columns. Degree 2 runs with the defaults at 45.
+//! path at 93 output columns with the bias term. Degree 2 runs with the
+//! defaults at 45 columns, bias included.
 
 mod common;
 

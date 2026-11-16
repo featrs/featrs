@@ -1,15 +1,14 @@
-//! RollingAggregator transform with a 1000-row window over 100k rows.
+//! RollingAggregator fit and transform with a 1000-row window over 100k rows.
 //!
-//! The aggregator is O(n * window), so the group runs ten samples per
-//! function instead of Criterion's default hundred.
+//! The transform is O(n * window), so the group runs ten samples per function
+//! instead of Criterion's default hundred.
 
 mod common;
 
-use common::{Profile, numeric_frame};
-use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use common::{Profile, bench_fit_transform, numeric_frame};
+use criterion::{Criterion, criterion_group, criterion_main};
 use featrs::prelude::*;
 use featrs::time_series::rolling::RollingFn;
-use std::hint::black_box;
 
 fn time_series(c: &mut Criterion) {
     let profile = Profile::from_env();
@@ -29,10 +28,8 @@ fn time_series(c: &mut Criterion) {
     ];
 
     for (name, function) in functions {
-        let mut aggregator = RollingAggregator::new(&["f0"], 1000, function);
-        aggregator.fit(frame.clone()).expect("fit");
-        group.bench_with_input(BenchmarkId::new(name, &shape), &frame, |bencher, frame| {
-            bencher.iter(|| black_box(aggregator.transform(frame.clone()).expect("transform")))
+        bench_fit_transform(&mut group, name, &shape, &frame, || {
+            RollingAggregator::new(&["f0"], 1000, function)
         });
     }
 

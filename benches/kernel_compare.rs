@@ -44,6 +44,7 @@ fn hand_max(values: &[f64]) -> f64 {
 fn kernel_compare(c: &mut Criterion) {
     let profile = Profile::from_env();
     let count = profile.rows(1_000_000);
+    let shape = format!("{count}rows");
     let values = values(count);
     let series = Series::new("value".into(), values.clone());
     let column = series.f64().expect("Float64 series");
@@ -51,34 +52,34 @@ fn kernel_compare(c: &mut Criterion) {
     let mut group = c.benchmark_group("kernel_compare");
 
     group.bench_with_input(
-        BenchmarkId::new("var", "hand"),
+        BenchmarkId::new("var", format!("hand/{shape}")),
         &values,
         |bencher, values| bencher.iter(|| black_box(hand_var(values))),
     );
     group.bench_with_input(
-        BenchmarkId::new("var", "polars"),
+        BenchmarkId::new("var", format!("polars/{shape}")),
         &column,
         |bencher, column| bencher.iter(|| black_box(column.var(0))),
     );
 
     group.bench_with_input(
-        BenchmarkId::new("median", "hand"),
+        BenchmarkId::new("median", format!("hand/{shape}")),
         &values,
         |bencher, values| bencher.iter(|| black_box(hand_percentile(values.clone(), 50.0))),
     );
     group.bench_with_input(
-        BenchmarkId::new("median", "polars"),
+        BenchmarkId::new("median", format!("polars/{shape}")),
         &column,
         |bencher, column| bencher.iter(|| black_box(column.median())),
     );
 
     group.bench_with_input(
-        BenchmarkId::new("quantile25", "hand"),
+        BenchmarkId::new("quantile25", format!("hand/{shape}")),
         &values,
         |bencher, values| bencher.iter(|| black_box(hand_percentile(values.clone(), 25.0))),
     );
     group.bench_with_input(
-        BenchmarkId::new("quantile25", "polars"),
+        BenchmarkId::new("quantile25", format!("polars/{shape}")),
         &column,
         |bencher, column| {
             bencher.iter(|| {
@@ -92,23 +93,23 @@ fn kernel_compare(c: &mut Criterion) {
     );
 
     group.bench_with_input(
-        BenchmarkId::new("min", "hand"),
+        BenchmarkId::new("min", format!("hand/{shape}")),
         &values,
         |bencher, values| bencher.iter(|| black_box(hand_min(values))),
     );
     group.bench_with_input(
-        BenchmarkId::new("min", "polars"),
+        BenchmarkId::new("min", format!("polars/{shape}")),
         &column,
         |bencher, column| bencher.iter(|| black_box(column.min())),
     );
 
     group.bench_with_input(
-        BenchmarkId::new("max", "hand"),
+        BenchmarkId::new("max", format!("hand/{shape}")),
         &values,
         |bencher, values| bencher.iter(|| black_box(hand_max(values))),
     );
     group.bench_with_input(
-        BenchmarkId::new("max", "polars"),
+        BenchmarkId::new("max", format!("polars/{shape}")),
         &column,
         |bencher, column| bencher.iter(|| black_box(column.max())),
     );
