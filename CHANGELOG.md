@@ -20,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `FeatureHasher.fit` now rejects an empty column selection with
   `Error::InvalidInput` instead of fitting and emitting all-zero hash buckets
   (#289).
+- `FeatureHasher.fit` now rejects a zero-row frame with `Error::InvalidInput`,
+  matching the other text transformers, instead of fitting on no data (#290).
 
 ## [0.6.0] - 2026-11-10
 
