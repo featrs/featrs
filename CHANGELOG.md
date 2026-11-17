@@ -15,6 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and Polars kernels measured side by side (#21). The default profile divides
   every row count by ten; `FEATRS_BENCH_PROFILE=full` runs the larger sizes.
 
+### Fixed
+
+- `FeatureHasher.fit` now rejects an empty column selection with
+  `Error::InvalidInput` instead of fitting and emitting all-zero hash buckets
+  (#289).
+
 ## [0.6.0] - 2026-11-10
 
 **Milestone:** [v0.6.0 - Pipeline Composition & Automation](https://github.com/featrs/featrs/milestone/3)

@@ -46,7 +46,8 @@ pub struct FeatureHasher {
 impl FeatureHasher {
     /// Create a new `FeatureHasher`.
     ///
-    /// * `columns` — names of string columns to hash
+    /// * `columns` — names of string columns to hash; `fit` rejects an empty
+    ///   selection
     /// * `n_features` — number of hash buckets (output dimension)
     pub fn new(columns: &[&str], n_features: usize) -> Self {
         Self {
@@ -83,6 +84,13 @@ impl Fit<DataFrame> for FeatureHasher {
         if self.n_features == 0 {
             return Err(Error::InvalidInput(
                 "FeatureHasher: n_features must be >= 1.".into(),
+            ));
+        }
+        if self.columns.is_empty() {
+            return Err(Error::InvalidInput(
+                "FeatureHasher.fit has no selected columns. \
+                 Select at least one String column to hash."
+                    .into(),
             ));
         }
         for col in &self.columns {
@@ -236,5 +244,22 @@ mod tests {
             transform_err.contains("not fitted"),
             "transform after a failed fit should report NotFitted, got: {transform_err}"
         );
+    }
+
+    /// An empty column selection is a fit error, not an all-zero output
+    /// (regression test for issue #289).
+    #[test]
+    fn test_fit_rejects_empty_selection() {
+        let c = Column::from(Series::new("text".into(), &["a", "b"]));
+        let df = DataFrame::new(2, vec![c]).unwrap();
+        let mut fh = FeatureHasher::new(&[], 4);
+
+        let err = fh.fit(df.clone()).unwrap_err();
+        assert!(matches!(err, Error::InvalidInput(_)), "got: {err}");
+        assert!(
+            err.to_string().contains("no selected columns"),
+            "error should mention the empty selection, got: {err}"
+        );
+        assert!(matches!(fh.transform(df), Err(Error::NotFitted(_))));
     }
 }
