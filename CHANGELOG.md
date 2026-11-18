@@ -20,6 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `FeatureHasher.fit` now rejects an empty column selection with
   `Error::InvalidInput` instead of fitting and emitting all-zero hash buckets
   (#289).
+- `Normalizer` now scales every row with a non-zero norm to unit norm. Rows
+  whose norm was positive but below `f64::EPSILON` (for example
+  `[1e-20, 2e-20]`) used to be returned unchanged; only an all-zero row is left
+  as is now (#310).
 
 ## [0.6.0] - 2026-11-10
 
