@@ -20,6 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `FeatureHasher.fit` now rejects an empty column selection with
   `Error::InvalidInput` instead of fitting and emitting all-zero hash buckets
   (#289).
+- `NumericStats` now treats two `NaN` fields as equal, so a summary with
+  undefined `skew` and `kurtosis` (a constant column) compares equal to itself,
+  and so do the `ColumnQualityReport` and `DataQualityReport` values that hold
+  it (#344).
 
 ## [0.6.0] - 2026-11-10
 

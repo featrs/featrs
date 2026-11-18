@@ -46,7 +46,10 @@ pub enum Cardinality {
 /// second moment), because the standardized moments are undefined there.
 /// `kurtosis` is the raw (non-excess) fourth standardized moment: `3.0` for a
 /// Gaussian, as in [`AutoScaler`](crate::preprocessing::auto_scaler::AutoScaler).
-#[derive(Debug, Clone, PartialEq)]
+///
+/// Equality treats two `NaN` fields as equal, so a summary with undefined
+/// moments still compares equal to itself and to an identical summary.
+#[derive(Debug, Clone)]
 pub struct NumericStats {
     /// Arithmetic mean of the finite values.
     pub mean: f64,
@@ -62,6 +65,21 @@ pub struct NumericStats {
     pub skew: f64,
     /// Raw (non-excess) fourth standardized moment, or `NaN` when undefined.
     pub kurtosis: f64,
+}
+
+impl PartialEq for NumericStats {
+    fn eq(&self, other: &Self) -> bool {
+        fn same(a: f64, b: f64) -> bool {
+            a == b || (a.is_nan() && b.is_nan())
+        }
+        same(self.mean, other.mean)
+            && same(self.std, other.std)
+            && same(self.min, other.min)
+            && same(self.max, other.max)
+            && same(self.median, other.median)
+            && same(self.skew, other.skew)
+            && same(self.kurtosis, other.kurtosis)
+    }
 }
 
 /// Outlier counts for a `Float64` column under the three rules
@@ -875,6 +893,39 @@ mod tests {
 
     fn column<'a>(r: &'a DataQualityReport, name: &str) -> &'a ColumnQualityReport {
         r.columns.iter().find(|c| c.name == name).unwrap()
+    }
+
+    #[test]
+    fn test_numeric_stats_with_nan_moments_equals_itself() {
+        let s = NumericStats {
+            mean: 1.0,
+            std: 0.0,
+            min: 1.0,
+            max: 1.0,
+            median: 1.0,
+            skew: f64::NAN,
+            kurtosis: f64::NAN,
+        };
+        assert_eq!(s, s.clone());
+        let other = NumericStats {
+            mean: 2.0,
+            ..s.clone()
+        };
+        assert_ne!(s, other);
+        let finite_skew = NumericStats {
+            skew: 0.0,
+            ..s.clone()
+        };
+        assert_ne!(s, finite_skew);
+    }
+
+    #[test]
+    fn test_reports_with_constant_column_compare_equal() {
+        let frame = df(vec![col("c", &[4.0, 4.0, 4.0]), col("x", &[1.0, 2.0, 3.0])]);
+        let a = report(&frame);
+        let b = report(&frame);
+        assert!(column(&a, "c").statistics.as_ref().unwrap().skew.is_nan());
+        assert_eq!(a, b);
     }
 
     #[test]
