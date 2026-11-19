@@ -17,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `InteractionFeatures.fit` now rejects an explicit empty column selection
+  with `Error::InvalidInput` instead of silently auto-discovering every
+  `Float64` column (#284).
 - `FeatureHasher.fit` now rejects an empty column selection with
   `Error::InvalidInput` instead of fitting and emitting all-zero hash buckets
   (#289).
