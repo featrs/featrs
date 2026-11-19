@@ -93,6 +93,13 @@ impl Fit<DataFrame> for FeatureHasher {
                     .into(),
             ));
         }
+        if x.height() == 0 {
+            return Err(Error::InvalidInput(
+                "FeatureHasher.fit received an empty DataFrame. \
+                 Provide at least one row to fit."
+                    .into(),
+            ));
+        }
         for col in &self.columns {
             let s = x.column(col.as_str()).map_err(|_| {
                 Error::InvalidInput(format!("FeatureHasher.fit: column '{}' not found.", col))
@@ -259,6 +266,24 @@ mod tests {
         assert!(
             err.to_string().contains("no selected columns"),
             "error should mention the empty selection, got: {err}"
+        );
+        assert!(matches!(fh.transform(df), Err(Error::NotFitted(_))));
+    }
+
+    /// A zero-row frame is a fit error, matching the sibling text transformers
+    /// (regression test for issue #290).
+    #[test]
+    fn test_fit_rejects_zero_row_frame() {
+        let empty: [&str; 0] = [];
+        let c = Column::from(Series::new("text".into(), &empty));
+        let df = DataFrame::new(0, vec![c]).unwrap();
+        let mut fh = FeatureHasher::new(&["text"], 4);
+
+        let err = fh.fit(df.clone()).unwrap_err();
+        assert!(matches!(err, Error::InvalidInput(_)), "got: {err}");
+        assert!(
+            err.to_string().contains("empty DataFrame"),
+            "error should mention the empty DataFrame, got: {err}"
         );
         assert!(matches!(fh.transform(df), Err(Error::NotFitted(_))));
     }
