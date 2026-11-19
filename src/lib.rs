@@ -68,6 +68,7 @@ pub mod prelude {
     pub use crate::feature_selection::SelectKBest;
     pub use crate::feature_selection::SelectPercentile;
     pub use crate::feature_selection::VarianceThreshold;
+    pub use crate::feature_selection::correlation_threshold::CorrelationMethod;
     pub use crate::feature_selection::select_kbest::FClassif;
     pub use crate::feature_selection::select_kbest::FRegression;
     pub use crate::pipeline::CachedPipeline;
@@ -79,6 +80,7 @@ pub mod prelude {
     pub use crate::pipeline::LazyPipeline;
     pub use crate::pipeline::Pipeline;
     pub use crate::pipeline::column_transformer::Remainder;
+    pub use crate::pipeline::conditional_pipeline::ColumnPredicate;
     pub use crate::preprocessing::auto_imputer::{
         AutoImputer, ImputationStrategy, NullColumnBehavior,
     };
@@ -142,9 +144,9 @@ pub mod prelude {
     pub use crate::time_series::ewma::{
         EWMASmoothing, EWMAStatistic, ExponentiallyWeightedMovingAverage,
     };
-    pub use crate::time_series::expanding::ExpandingAggregator;
+    pub use crate::time_series::expanding::{ExpandingAggregator, ExpandingFn};
     pub use crate::time_series::lag::Lagger;
-    pub use crate::time_series::rolling::RollingAggregator;
+    pub use crate::time_series::rolling::{RollingAggregator, RollingFn};
     pub use crate::traits::inverse::{HasInverse, InverseTransform};
     pub use crate::traits::output_names::FeatureNamesOut;
     pub use crate::traits::schema::{

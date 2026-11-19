@@ -20,6 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `FeatureHasher.fit` now rejects an empty column selection with
   `Error::InvalidInput` instead of fitting and emitting all-zero hash buckets
   (#289).
+- The prelude now re-exports `RollingFn`, `ExpandingFn`, `ColumnPredicate`, and
+  `CorrelationMethod`, so `use featrs::prelude::*` is enough to configure
+  `RollingAggregator`, `ExpandingAggregator`, `ConditionalPipeline`, and
+  `CorrelationThreshold` (#332).
 
 ## [0.6.0] - 2026-11-10
 
