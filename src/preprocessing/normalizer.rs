@@ -163,8 +163,10 @@ impl Transform<DataFrame> for Normalizer {
                     i
                 )));
             }
-            // Only an all-zero row is left as is; any non-zero norm, however
-            // small, scales the row to unit length (as scikit-learn does).
+            // Any positive computed norm scales the row; a zero norm leaves it
+            // as is. For L2, squares below the normal range lose precision, so
+            // a component near 1e-162 can still come out a few percent from
+            // unit norm (#367).
             if norm > 0.0 {
                 for col in &mut col_data {
                     if let Some(v) = col[i].as_mut()
