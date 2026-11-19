@@ -269,3 +269,18 @@ fn test_end_to_end_auto_pipeline() {
         assert!(names.contains(&expected.to_string()), "missing {expected}");
     }
 }
+
+/// The prelude glob alone is enough to configure the transformers whose
+/// constructors or builders take a configuration enum.
+mod prelude_configuration_enums {
+    use featrs::prelude::*;
+
+    #[test]
+    fn test_prelude_exports_configuration_enums() {
+        let _rolling = RollingAggregator::new(&["x"], 3, RollingFn::Mean);
+        let _expanding = ExpandingAggregator::new(&["x"], ExpandingFn::Sum);
+        let _selector = CorrelationThreshold::new().method(CorrelationMethod::Spearman);
+        let _routing = ConditionalPipeline::new()
+            .rule(ColumnPredicate::IsFloat64, Box::new(StandardScaler::new()));
+    }
+}

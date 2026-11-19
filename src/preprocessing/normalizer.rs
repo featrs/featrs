@@ -163,7 +163,11 @@ impl Transform<DataFrame> for Normalizer {
                     i
                 )));
             }
-            if norm > f64::EPSILON {
+            // Any positive computed norm scales the row; a zero norm leaves it
+            // as is. For L2, squares below the normal range lose precision, so
+            // a component near 1e-162 can still come out a few percent from
+            // unit norm (#367).
+            if norm > 0.0 {
                 for col in &mut col_data {
                     if let Some(v) = col[i].as_mut()
                         && !v.is_nan()
@@ -318,5 +322,28 @@ mod tests {
             res.is_err(),
             "Normalizer L2 on 1e300 magnitude row must error on norm overflow"
         );
+    }
+
+    /// Regression for #310: a row whose norm is positive but below
+    /// `f64::EPSILON` is still scaled to unit norm under every norm.
+    #[test]
+    fn test_normalizer_tiny_nonzero_row_is_unit_norm() {
+        let a = Column::from(Series::new("a".into(), &[1e-20_f64, 1e-16, 0.0]));
+        let b = Column::from(Series::new("b".into(), &[2e-20_f64, 1e-16, 0.0]));
+        let df = DataFrame::new(3, vec![a, b]).unwrap();
+        for norm in [Norm::L1, Norm::L2, Norm::Max] {
+            let mut n = Normalizer::new(norm);
+            n.fit(df.clone()).unwrap();
+            let out = n.transform(df.clone()).unwrap();
+            let col_a = out.column("a").unwrap().f64().unwrap();
+            let col_b = out.column("b").unwrap().f64().unwrap();
+            for row in 0..2 {
+                let vals = [col_a.get(row).unwrap(), col_b.get(row).unwrap()];
+                assert_relative_eq!(Normalizer::row_norm(&vals, norm), 1.0, epsilon = 1e-12);
+            }
+            // An all-zero row has no direction and stays zero.
+            assert_eq!(col_a.get(2), Some(0.0));
+            assert_eq!(col_b.get(2), Some(0.0));
+        }
     }
 }
