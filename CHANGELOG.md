@@ -24,6 +24,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whose norm was positive but below `f64::EPSILON` (for example
   `[1e-20, 2e-20]`) used to be returned unchanged; only an all-zero row is left
   as is now (#310).
+- The prelude now re-exports `RollingFn`, `ExpandingFn`, `ColumnPredicate`, and
+  `CorrelationMethod`, so `use featrs::prelude::*` is enough to configure
+  `RollingAggregator`, `ExpandingAggregator`, `ConditionalPipeline`, and
+  `CorrelationThreshold` (#332).
+- `NumericStats` now treats two `NaN` fields as equal, so a summary with
+  undefined `skew` and `kurtosis` (a constant column) compares equal to itself.
+  Reports whose remaining fields match then compare equal as well. Note that
+  `NumericStats` no longer derives `PartialEq`, so constant patterns such as
+  `matches!(stats, BASELINE)` no longer compile; compare with `==` instead
+  (#344).
 
 ## [0.6.0] - 2026-11-10
 
