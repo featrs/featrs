@@ -78,9 +78,25 @@ impl Normalizer {
         let clean_vals = values.iter().copied().filter(|v| !v.is_nan());
         match norm {
             Norm::L1 => clean_vals.map(|v| v.abs()).sum(),
-            Norm::L2 => clean_vals.map(|v| v * v).sum::<f64>().sqrt(),
+            Norm::L2 => Self::l2_norm(values),
             Norm::Max => clean_vals.map(|v| v.abs()).fold(0.0f64, f64::max),
         }
+    }
+
+    /// L2 norm that keeps full precision when the squares fall below the
+    /// normal `f64` range, by rescaling with the largest absolute component.
+    /// A sum of squares that overflows still returns infinity.
+    fn l2_norm(values: &[f64]) -> f64 {
+        let clean_vals = values.iter().copied().filter(|v| !v.is_nan());
+        let sum_sq: f64 = clean_vals.clone().map(|v| v * v).sum();
+        if sum_sq >= f64::MIN_POSITIVE {
+            return sum_sq.sqrt();
+        }
+        let scale = Self::row_norm(values, Norm::Max);
+        if scale == 0.0 {
+            return 0.0;
+        }
+        scale * clean_vals.map(|v| (v / scale).powi(2)).sum::<f64>().sqrt()
     }
 }
 
@@ -164,9 +180,7 @@ impl Transform<DataFrame> for Normalizer {
                 )));
             }
             // Any positive computed norm scales the row; a zero norm leaves it
-            // as is. For L2, squares below the normal range lose precision, so
-            // a component near 1e-162 can still come out a few percent from
-            // unit norm (#367).
+            // as is.
             if norm > 0.0 {
                 for col in &mut col_data {
                     if let Some(v) = col[i].as_mut()
@@ -345,5 +359,25 @@ mod tests {
             assert_eq!(col_a.get(2), Some(0.0));
             assert_eq!(col_b.get(2), Some(0.0));
         }
+    }
+
+    /// Regression for #367: L2 rows whose squares are subnormal or zero are
+    /// still scaled to unit norm.
+    #[test]
+    fn test_normalizer_l2_subnormal_squares_unit_norm() {
+        let tiny = 1.5 * 2f64.powi(-537);
+        let a = Column::from(Series::new("a".into(), &[tiny, 1e-170, 3e-170]));
+        let b = Column::from(Series::new("b".into(), &[0.0_f64, 0.0, 4e-170]));
+        let df = DataFrame::new(3, vec![a, b]).unwrap();
+        let mut n = Normalizer::l2();
+        n.fit(df.clone()).unwrap();
+        let out = n.transform(df).unwrap();
+        let col_a = out.column("a").unwrap().f64().unwrap();
+        let col_b = out.column("b").unwrap().f64().unwrap();
+        assert_relative_eq!(col_a.get(0).unwrap(), 1.0, epsilon = 1e-12);
+        assert_relative_eq!(col_a.get(1).unwrap(), 1.0, epsilon = 1e-12);
+        assert_eq!(col_b.get(1), Some(0.0));
+        assert_relative_eq!(col_a.get(2).unwrap(), 0.6, epsilon = 1e-12);
+        assert_relative_eq!(col_b.get(2).unwrap(), 0.8, epsilon = 1e-12);
     }
 }
