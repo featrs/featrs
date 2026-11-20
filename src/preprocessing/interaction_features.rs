@@ -148,7 +148,8 @@ impl InteractionFeaturesBuilder {
     ///
     /// Each column must exist in the frame passed to `fit` and have dtype
     /// `Float64`; otherwise `fit` returns
-    /// [`Error::InvalidInput`].
+    /// [`Error::InvalidInput`]. An explicit empty slice is also rejected at
+    /// `fit` rather than treated as auto-discovery.
     pub fn columns(mut self, cols: &[&str]) -> Self {
         self.columns = Some(cols.iter().map(|s| s.to_string()).collect());
         self
@@ -191,7 +192,14 @@ impl Fit<DataFrame> for InteractionFeatures {
         }
 
         let resolved = match &self.columns {
-            Some(cols) if !cols.is_empty() => {
+            Some(cols) if cols.is_empty() => {
+                return Err(Error::InvalidInput(
+                    "InteractionFeatures.fit: an explicit empty column selection is not allowed; \
+                     omit `columns` to auto-discover all Float64 columns."
+                        .into(),
+                ));
+            }
+            Some(cols) => {
                 for col in cols {
                     let c = x.column(col.as_str()).map_err(|e| {
                         Error::InvalidInput(format!(
@@ -207,7 +215,7 @@ impl Fit<DataFrame> for InteractionFeatures {
                 }
                 cols.clone()
             }
-            _ => {
+            None => {
                 let discovered = numeric_f64_columns(&x);
                 if discovered.is_empty() {
                     let all_types: Vec<String> = x
@@ -669,5 +677,14 @@ mod tests {
         let err = xf.transform(df).unwrap_err();
         assert!(matches!(err, Error::InvalidInput(_)));
         assert!(err.to_string().contains("a_x_b_x_c"));
+    }
+
+    #[test]
+    fn test_interaction_explicit_empty_selection_rejected() {
+        let df = make_two_col_df();
+        let mut xf = InteractionFeatures::builder().columns(&[]).build();
+        let err = xf.fit(df).unwrap_err();
+        assert!(matches!(err, Error::InvalidInput(_)));
+        assert!(err.to_string().contains("empty column selection"));
     }
 }
