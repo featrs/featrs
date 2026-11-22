@@ -17,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `CONTRIBUTING.md` now tells contributors to implement `Fit<DataFrame>` (not the
+  nonexistent two-parameter `Fit<DataFrame, DataFrame>`), and names
+  `FitSupervised<DataFrame, DataFrame>` for supervised transformers (#336).
 - `InteractionFeatures.fit` now rejects an explicit empty column selection
   with `Error::InvalidInput` instead of silently auto-discovering every
   `Float64` column (#284).

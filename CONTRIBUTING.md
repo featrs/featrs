@@ -20,7 +20,9 @@ cargo test
 ## Adding a new transformer
 
 1. Create a struct with `fitted: bool` and parameter fields
-2. Implement `Fit<DataFrame, DataFrame>` and `Transform<DataFrame>`
+2. Implement `Fit<DataFrame>` (with `type Output = ()` for a transformer that fits
+   in place) and `Transform<DataFrame>`. Supervised transformers implement
+   `FitSupervised<DataFrame, DataFrame>` instead of `Fit`
 3. Add module docs (`//!`), struct docs (`///`), and constructor docs
 4. Add tests in a `#[cfg(test)] mod tests` block
 5. Register the module in the parent `mod.rs`
