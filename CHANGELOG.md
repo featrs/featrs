@@ -29,10 +29,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Rows whose norm was positive but below `f64::EPSILON` (for example
   `[1e-20, 2e-20]`) used to be returned unchanged; only rows whose computed
   norm is zero are left as is now (#310).
-- `Normalizer` L2 now rescales by the largest component when the sum of
-  squares falls below the normal `f64` range, so rows such as `[1e-170, 0]`
-  come out unit norm instead of unchanged or a few percent off. Rows whose sum
-  of squares overflows still return an error (#367).
+- `Normalizer` L2 now rescales by the largest absolute component when the sum
+  of squares falls below the normal `f64` range, so rows such as `[1e-170, 0]`
+  or `[5e-324, 5e-324]` come out unit norm instead of unchanged or off by
+  several percent. Rows whose sum of squares overflows still return an error
+  (#367).
 - The prelude now re-exports `RollingFn`, `ExpandingFn`, `ColumnPredicate`, and
   `CorrelationMethod`, so `use featrs::prelude::*` is enough to configure
   `RollingAggregator`, `ExpandingAggregator`, `ConditionalPipeline`, and

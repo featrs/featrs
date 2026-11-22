@@ -46,6 +46,24 @@ pub enum Norm {
     Max,
 }
 
+/// The two divisors that together scale a row to unit norm.
+#[derive(Clone, Copy)]
+struct RowNorm {
+    /// Applied first. `1.0` unless an L2 norm had to be rescaled.
+    scale: f64,
+    /// Applied second. The norm of the row after dividing by `scale`.
+    divisor: f64,
+}
+
+impl RowNorm {
+    fn direct(divisor: f64) -> Self {
+        Self {
+            scale: 1.0,
+            divisor,
+        }
+    }
+}
+
 impl Normalizer {
     /// Create a new `Normalizer` with the given norm.
     pub fn new(norm: Norm) -> Self {
@@ -70,33 +88,44 @@ impl Normalizer {
         Self::new(Norm::Max)
     }
 
-    /// Compute the norm of a single row, ignoring `NaN` entries.
+    /// Compute the divisors that scale a single row to unit norm, ignoring
+    /// `NaN` entries. Components are divided by `scale` first, then by
+    /// `divisor`.
     ///
     /// Note: the L2 variant sums squares, so it can overflow to infinity on
-    /// extreme-magnitude inputs; callers must reject non-finite results.
-    fn row_norm(values: &[f64], norm: Norm) -> f64 {
+    /// extreme-magnitude inputs; callers must reject non-finite divisors.
+    fn row_norm(values: &[f64], norm: Norm) -> RowNorm {
         let clean_vals = values.iter().copied().filter(|v| !v.is_nan());
         match norm {
-            Norm::L1 => clean_vals.map(|v| v.abs()).sum(),
+            Norm::L1 => RowNorm::direct(clean_vals.map(|v| v.abs()).sum()),
             Norm::L2 => Self::l2_norm(values),
-            Norm::Max => clean_vals.map(|v| v.abs()).fold(0.0f64, f64::max),
+            Norm::Max => RowNorm::direct(clean_vals.map(|v| v.abs()).fold(0.0f64, f64::max)),
         }
     }
 
-    /// L2 norm that keeps full precision when the squares fall below the
-    /// normal `f64` range, by rescaling with the largest absolute component.
-    /// A sum of squares that overflows still returns infinity.
-    fn l2_norm(values: &[f64]) -> f64 {
+    /// L2 divisors. When the sum of squares falls below the normal `f64`
+    /// range, the norm is computed after dividing by the largest absolute
+    /// component. Reconstructing it as `scale * divisor` would round a
+    /// subnormal norm to a whole multiple of `scale` and lose the direction.
+    /// A sum of squares that overflows still yields an infinite divisor.
+    fn l2_norm(values: &[f64]) -> RowNorm {
         let clean_vals = values.iter().copied().filter(|v| !v.is_nan());
         let sum_sq: f64 = clean_vals.clone().map(|v| v * v).sum();
         if sum_sq >= f64::MIN_POSITIVE {
-            return sum_sq.sqrt();
+            return RowNorm::direct(sum_sq.sqrt());
         }
-        let scale = Self::row_norm(values, Norm::Max);
+        let scale = clean_vals.clone().map(|v| v.abs()).fold(0.0f64, f64::max);
         if scale == 0.0 {
-            return 0.0;
+            return RowNorm::direct(0.0);
         }
-        scale * clean_vals.map(|v| (v / scale).powi(2)).sum::<f64>().sqrt()
+        let divisor = clean_vals
+            .map(|v| {
+                let ratio = v / scale;
+                ratio * ratio
+            })
+            .sum::<f64>()
+            .sqrt();
+        RowNorm { scale, divisor }
     }
 }
 
@@ -172,7 +201,7 @@ impl Transform<DataFrame> for Normalizer {
         for i in 0..n_rows {
             let row_vals: Vec<f64> = col_data.iter().filter_map(|col| col[i]).collect();
             let norm = Self::row_norm(&row_vals, self.norm);
-            if !norm.is_finite() {
+            if !norm.divisor.is_finite() {
                 return Err(Error::InvalidInput(format!(
                     "Normalizer.transform: row {} norm overflowed or is not finite. \
                      Input values are too large for f64 norm computation.",
@@ -181,12 +210,12 @@ impl Transform<DataFrame> for Normalizer {
             }
             // Any positive computed norm scales the row; a zero norm leaves it
             // as is.
-            if norm > 0.0 {
+            if norm.divisor > 0.0 {
                 for col in &mut col_data {
                     if let Some(v) = col[i].as_mut()
                         && !v.is_nan()
                     {
-                        *v /= norm;
+                        *v = (*v / norm.scale) / norm.divisor;
                     }
                 }
             }
@@ -353,7 +382,12 @@ mod tests {
             let col_b = out.column("b").unwrap().f64().unwrap();
             for row in 0..2 {
                 let vals = [col_a.get(row).unwrap(), col_b.get(row).unwrap()];
-                assert_relative_eq!(Normalizer::row_norm(&vals, norm), 1.0, epsilon = 1e-12);
+                let row_norm = match norm {
+                    Norm::L1 => vals[0].abs() + vals[1].abs(),
+                    Norm::L2 => vals[0].hypot(vals[1]),
+                    Norm::Max => vals[0].abs().max(vals[1].abs()),
+                };
+                assert_relative_eq!(row_norm, 1.0, epsilon = 1e-12);
             }
             // An all-zero row has no direction and stays zero.
             assert_eq!(col_a.get(2), Some(0.0));
@@ -379,5 +413,37 @@ mod tests {
         assert_eq!(col_b.get(1), Some(0.0));
         assert_relative_eq!(col_a.get(2).unwrap(), 0.6, epsilon = 1e-12);
         assert_relative_eq!(col_b.get(2).unwrap(), 0.8, epsilon = 1e-12);
+    }
+
+    /// Regression for rows made only of subnormal components: when the largest
+    /// component is subnormal, reconstructing the norm as `scale * divisor`
+    /// rounds it back to a whole multiple of `scale`, so each component must
+    /// be divided by `scale` first.
+    #[test]
+    fn test_normalizer_l2_subnormal_components_unit_norm() {
+        let t = f64::from_bits(1);
+        let a = Column::from(Series::new("a".into(), &[t, t, 2.0 * t]));
+        let b = Column::from(Series::new("b".into(), &[t, 2.0 * t, 3.0 * t]));
+        let df = DataFrame::new(3, vec![a, b]).unwrap();
+        let mut n = Normalizer::l2();
+        n.fit(df.clone()).unwrap();
+        let out = n.transform(df).unwrap();
+        let col_a = out.column("a").unwrap().f64().unwrap();
+        let col_b = out.column("b").unwrap().f64().unwrap();
+        let expected = [
+            (
+                std::f64::consts::FRAC_1_SQRT_2,
+                std::f64::consts::FRAC_1_SQRT_2,
+            ),
+            (1.0 / 5.0f64.sqrt(), 2.0 / 5.0f64.sqrt()),
+            (2.0 / 13.0f64.sqrt(), 3.0 / 13.0f64.sqrt()),
+        ];
+        for (row, (want_a, want_b)) in expected.into_iter().enumerate() {
+            let got_a = col_a.get(row).unwrap();
+            let got_b = col_b.get(row).unwrap();
+            assert_relative_eq!(got_a, want_a, epsilon = 1e-12);
+            assert_relative_eq!(got_b, want_b, epsilon = 1e-12);
+            assert_relative_eq!(got_a.hypot(got_b), 1.0, epsilon = 1e-12);
+        }
     }
 }
