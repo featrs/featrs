@@ -19,7 +19,7 @@ Built on [Polars](https://pola.rs) — all transformations operate natively on `
 
 ```toml
 [dependencies]
-featrs = "0.5"
+featrs = "0.6"
 ```
 
 ## Quick start
@@ -329,6 +329,28 @@ use featrs::prelude::*;
 let mut fh = FeatureHasher::new(&["user_id", "category"], 100);
 fh.fit(df.clone())?;
 let hashed = fh.transform(df)?;  // 100 hashed columns
+```
+
+### Target encoding (leave-one-out)
+
+```rust
+use featrs::prelude::*;
+use polars::prelude::*;
+
+let x = df!(
+    "city" => &["paris", "paris", "berlin", "berlin", "berlin"],
+    "spend" => &[10.0_f64, 20.0, 30.0, 40.0, 50.0]
+)?;
+let y = df!("revenue" => &[100.0_f64, 120.0, 200.0, 220.0, 240.0])?;
+
+let mut enc = LeaveOneOutEncoder::new().alpha(1.0);
+enc.fit(x.clone(), y)?;
+
+// Training rows: each row's own target is excluded from its encoding.
+let encoded = enc.transform(x)?;
+
+// Unseen rows: full-sample per-category means, unseen categories get the global mean.
+let new_rows = enc.transform_unseen(df!("city" => &["paris", "tokyo"])?)?;
 ```
 
 ### AutoImputer
