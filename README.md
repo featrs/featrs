@@ -346,10 +346,10 @@ let y = df!("revenue" => &[100.0_f64, 120.0, 200.0, 220.0, 240.0])?;
 let mut enc = LeaveOneOutEncoder::new().alpha(1.0);
 enc.fit(x.clone(), y)?;
 
-// Training rows: each row's own target is excluded from its encoding.
+// Training rows: each row's category mean excludes its own target; the smoothing prior is the global mean over all training targets.
 let encoded = enc.transform(x)?;
 
-// Unseen rows: full-sample per-category means, unseen categories get the global mean.
+// Unseen rows: full-sample category means smoothed with alpha; unseen categories get the global mean.
 let new_rows = enc.transform_unseen(df!("city" => &["paris", "tokyo"])?)?;
 ```
 
