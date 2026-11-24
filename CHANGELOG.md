@@ -19,7 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `SimpleImputer` with `Strategy::Mean` or `Strategy::Median` now returns
   `Error::InvalidInput` at fit when the computed fill overflows or is not
-  finite, instead of writing infinity into missing values (#287).
+  finite, including when the column already contains infinity, instead of
+  writing infinity or NaN into missing values (#287).
 - `CONTRIBUTING.md` now tells contributors to implement `Fit<DataFrame>` (not the
   nonexistent two-parameter `Fit<DataFrame, DataFrame>`), and names
   `FitSupervised<DataFrame, DataFrame>` for supervised transformers (#336).
