@@ -183,9 +183,11 @@ impl Fit<DataFrame> for SimpleImputer {
             };
 
             // Mean and even-length Median of large finite values can overflow
-            // to ±inf. Existing ±inf in the column also makes the statistic
-            // non-finite. Reject at fit rather than writing inf or NaN into
-            // every null (issue #287). MostFrequent and Constant are unchanged.
+            // to ±inf. A ±inf already in the column always makes the Mean
+            // non-finite, and makes the Median non-finite only when it is one
+            // of the middle values. Reject at fit rather than writing inf or
+            // NaN into every null (issue #287). MostFrequent and Constant are
+            // unchanged.
             if matches!(self.strategy, Strategy::Mean | Strategy::Median) && !fill.is_finite() {
                 let (label, stat) = match self.strategy {
                     Strategy::Mean => ("Mean", "mean"),
@@ -562,9 +564,8 @@ mod tests {
 
     #[test]
     fn test_imputer_mean_infinite_input_error() {
-        // ±inf is kept in the statistic input (only NaN is dropped), so a
-        // column that already contains infinity also produces a non-finite
-        // Mean or Median fill and must be rejected at fit.
+        // ±inf is kept in the statistic input (only NaN is dropped). A +inf
+        // already in the column makes the Mean non-finite, so fit must reject.
         let x = Column::from(Series::new(
             "x".into(),
             &[Some(1.0_f64), Some(f64::INFINITY), None],
