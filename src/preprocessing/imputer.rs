@@ -182,6 +182,24 @@ impl Fit<DataFrame> for SimpleImputer {
                 Strategy::Constant(v) => v,
             };
 
+            // Mean and even-length Median of large finite values can overflow
+            // to ±inf. A ±inf already in the column always makes the Mean
+            // non-finite, and makes the Median non-finite only when it is one
+            // of the middle values. Reject at fit rather than writing inf or
+            // NaN into every null (issue #287). MostFrequent and Constant are
+            // unchanged.
+            if matches!(self.strategy, Strategy::Mean | Strategy::Median) && !fill.is_finite() {
+                let (label, stat) = match self.strategy {
+                    Strategy::Mean => ("Mean", "mean"),
+                    Strategy::Median => ("Median", "median"),
+                    _ => unreachable!(),
+                };
+                return Err(Error::InvalidInput(format!(
+                    "SimpleImputer({}): column '{}' {} overflowed or is not finite",
+                    label, name, stat
+                )));
+            }
+
             fill_values.insert(name, fill);
         }
 
@@ -503,5 +521,65 @@ mod tests {
         let mut imp = SimpleImputer::mean();
         let err = imp.fit(df).unwrap_err();
         assert!(matches!(err, Error::Computation(_)), "got {err}");
+    }
+
+    /// Regression for #287: a Mean or even-length Median of finite values
+    /// near the top of the f64 range can overflow to +inf. Fit must reject
+    /// that non-finite statistic instead of writing inf into every null cell.
+    fn overflowing_mean_frame() -> DataFrame {
+        let x = Column::from(Series::new(
+            "x".into(),
+            &[Some(1.7e308_f64), Some(1.7e308), None],
+        ));
+        DataFrame::new(3, vec![x]).unwrap()
+    }
+
+    #[test]
+    fn test_imputer_mean_overflow_error() {
+        let mut imp = SimpleImputer::mean();
+        let err = imp.fit(overflowing_mean_frame()).unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidInput(_)),
+            "Mean overflow must be InvalidInput, got {err}"
+        );
+        assert!(
+            err.to_string().contains("overflow"),
+            "error should mention overflow, got {err}"
+        );
+    }
+
+    #[test]
+    fn test_imputer_median_overflow_error() {
+        let mut imp = SimpleImputer::median();
+        let err = imp.fit(overflowing_mean_frame()).unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidInput(_)),
+            "Median overflow must be InvalidInput, got {err}"
+        );
+        assert!(
+            err.to_string().contains("overflow"),
+            "error should mention overflow, got {err}"
+        );
+    }
+
+    #[test]
+    fn test_imputer_mean_infinite_input_error() {
+        // ±inf is kept in the statistic input (only NaN is dropped). A +inf
+        // already in the column makes the Mean non-finite, so fit must reject.
+        let x = Column::from(Series::new(
+            "x".into(),
+            &[Some(1.0_f64), Some(f64::INFINITY), None],
+        ));
+        let df = DataFrame::new(3, vec![x]).unwrap();
+        let mut imp = SimpleImputer::mean();
+        let err = imp.fit(df).unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidInput(_)),
+            "non-finite Mean from +inf input must be InvalidInput, got {err}"
+        );
+        assert!(
+            err.to_string().contains("SimpleImputer(Mean)"),
+            "error should name SimpleImputer(Mean), got {err}"
+        );
     }
 }
