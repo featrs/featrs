@@ -244,6 +244,14 @@ impl Default for AutoImputer {
 impl Fit<DataFrame> for AutoImputer {
     type Output = ();
 
+    /// Fit the per-column plan and the delegating [`ColumnTransformer`].
+    ///
+    /// A column containing `+-Inf` alongside missing values now fails the fit
+    /// with [`Error::InvalidInput`] instead of being filled: the heuristic
+    /// selects [`ImputationStrategy::Mean`] for it because `skewness` returns
+    /// `0.0` when the mean is not finite, and `Mean` cannot produce a finite
+    /// fill. The error is surfaced by the [`ColumnTransformer`] that delegates
+    /// to [`SimpleImputer`].
     fn fit(&mut self, x: DataFrame) -> Result<()> {
         // Reset first so a failed re-fit cannot leave a stale plan usable by a
         // later transform.
