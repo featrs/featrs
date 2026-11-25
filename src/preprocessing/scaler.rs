@@ -408,8 +408,19 @@ impl Fit<DataFrame> for MinMaxScaler {
 
             let col_min = vals.iter().copied().fold(f64::INFINITY, f64::min);
             let col_max = vals.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            let span = col_max - col_min;
 
-            if (col_max - col_min).abs() < f64::EPSILON {
+            // ±inf input values are left to the input policy in #183; only a
+            // finite min and max whose difference overflows is rejected here.
+            if col_min.is_finite() && col_max.is_finite() && !span.is_finite() {
+                return Err(Error::InvalidInput(format!(
+                    "MinMaxScaler: column '{}' span (max - min) overflowed or is not finite. \
+                     Input values are too large for f64 computation.",
+                    name
+                )));
+            }
+
+            if span.abs() < f64::EPSILON {
                 return Err(Error::Computation(format!(
                     "MinMaxScaler: column '{}' is constant (all values = {}). \
                      Cannot scale a constant column. Remove it or use StandardScaler \
@@ -418,7 +429,7 @@ impl Fit<DataFrame> for MinMaxScaler {
                 )));
             }
 
-            let scale = (r_max - r_min) / (col_max - col_min);
+            let scale = (r_max - r_min) / span;
             params.push(MinMaxParam {
                 name: name.clone(),
                 min: col_min,
@@ -1193,6 +1204,24 @@ mod tests {
         assert!(
             fit_result.is_err(),
             "RobustScaler on overflowing IQR data must error"
+        );
+    }
+
+    /// MinMaxScaler must reject a finite column whose span overflows f64,
+    /// instead of fitting a zero scale that flattens the feature (#286).
+    #[test]
+    fn test_minmax_scaler_span_overflow_error() {
+        let x = Column::from(Series::new("x".into(), &[-1.5e308_f64, 0.0, 1.5e308]));
+        let df = DataFrame::new(3, vec![x]).unwrap();
+        let mut scaler = MinMaxScaler::new();
+        let fit_result = scaler.fit(df);
+        assert!(
+            matches!(fit_result, Err(Error::InvalidInput(_))),
+            "MinMaxScaler on a finite column whose span overflows must error"
+        );
+        assert!(
+            !scaler.fitted,
+            "a failed fit must leave the scaler unfitted"
         );
     }
 

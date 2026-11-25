@@ -17,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `MinMaxScaler` now returns `Error::InvalidInput` at fit when a finite
+  column's span (`max - min`) overflows f64, matching `StandardScaler` and
+  `RobustScaler`, instead of fitting a zero scale that flattens the column
+  and makes `inverse_transform` return NaN (#286).
 - `SimpleImputer` with `Strategy::Mean` or `Strategy::Median` now returns
   `Error::InvalidInput` at fit when the computed fill overflows or is not
   finite, instead of writing infinity or NaN into missing values (#287).
