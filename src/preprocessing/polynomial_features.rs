@@ -124,6 +124,37 @@ impl PolynomialFeatures {
         Some(name)
     }
 
+    fn check_powers_through_first_cube(
+        n_features: usize,
+        mut check_power: impl FnMut(&[usize]) -> Result<()>,
+    ) -> Result<()> {
+        let mut power = vec![0; n_features];
+
+        // Match generate_powers' order: total degree first, then ascending
+        // lexicographic order. Check earlier collisions before the first cube.
+        for i in (0..n_features).rev() {
+            power[i] = 1;
+            check_power(&power)?;
+            power[i] = 0;
+        }
+        for i in (0..n_features).rev() {
+            power[i] = 1;
+            for j in (i + 1..n_features).rev() {
+                power[j] = 1;
+                check_power(&power)?;
+                power[j] = 0;
+            }
+            power[i] = 2;
+            check_power(&power)?;
+            power[i] = 0;
+        }
+
+        // Fit requires at least one Float64 column. The last column's cube
+        // comes first at degree three and has the same name as its square.
+        power[n_features - 1] = 3;
+        check_power(&power)
+    }
+
     fn generate_powers(
         n_features: usize,
         degree: usize,
@@ -287,12 +318,11 @@ impl Fit<DataFrame> for PolynomialFeatures {
         // `term_name`, and two equal names (e.g. an input column called
         // `a_b_inter` next to the `a * b` interaction) only fail later, inside
         // a fitted pipeline, as an opaque duplicate-column error.
-        let powers = Self::generate_powers(col_names.len(), self.degree, self.interaction_only);
         let mut seen: HashSet<String> = HashSet::new();
         if self.include_bias {
             seen.insert("bias".to_string());
         }
-        for power in &powers {
+        let mut check_power = |power: &[usize]| {
             if let Some(out_name) = Self::term_name(power, &col_names)
                 && !seen.insert(out_name.clone())
             {
@@ -302,6 +332,15 @@ impl Fit<DataFrame> for PolynomialFeatures {
                      degree >= 3 without interaction_only(true) always collides; otherwise \
                      rename the conflicting input column."
                 )));
+            }
+            Ok(())
+        };
+        if self.degree >= 3 && !self.interaction_only {
+            Self::check_powers_through_first_cube(col_names.len(), check_power)?;
+        } else {
+            for power in Self::generate_powers(col_names.len(), self.degree, self.interaction_only)
+            {
+                check_power(&power)?;
             }
         }
 
@@ -580,6 +619,35 @@ mod tests {
         let err = pf.fit(df).unwrap_err();
         assert!(
             matches!(err, Error::InvalidInput(ref m) if m.contains("degree >= 3")),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_fit_reports_first_power_name_collision_for_wide_frame() {
+        let columns = (0..60)
+            .map(|i| Column::from(Series::new(format!("c{i}").into(), &[1.0_f64])))
+            .collect();
+        let df = DataFrame::new(1, columns).unwrap();
+        let mut pf = PolynomialFeatures::new(4).unwrap();
+        let err = pf.fit(df).unwrap_err();
+        assert!(
+            matches!(&err, Error::InvalidInput(msg) if msg.contains("generated column 'c59^' collides")),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_fit_reports_degree_two_name_collision_before_cube() {
+        let columns = ["a", "a^", "b", "b^", "last"]
+            .into_iter()
+            .map(|name| Column::from(Series::new(name.into(), &[1.0_f64])))
+            .collect();
+        let df = DataFrame::new(1, columns).unwrap();
+        let mut pf = PolynomialFeatures::new(3).unwrap();
+        let err = pf.fit(df).unwrap_err();
+        assert!(
+            matches!(&err, Error::InvalidInput(msg) if msg.contains("generated column 'b^' collides")),
             "{err}"
         );
     }

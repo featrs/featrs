@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `PolynomialFeatures.fit` detects generated-name collisions for degree three
+  or higher with ordinary powers without building the full list of terms (#345).
 - `MinMaxScaler` now returns `Error::InvalidInput` at fit when a finite
   column's span (`max - min`) overflows f64, matching `StandardScaler` and
   `RobustScaler`, instead of fitting a zero scale that flattens the column
