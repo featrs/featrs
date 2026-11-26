@@ -22,8 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   finite, instead of writing infinity or NaN into missing values (#287).
   A ±inf already in the column always makes the Mean non-finite, and makes
   the Median non-finite only when it is one of the middle values. `AutoImputer`
-  delegates `Mean` and `Median` to `SimpleImputer` and reports the same error
-  through its `ColumnTransformer` (#375).
+  delegates `Mean` and `Median` to `SimpleImputer`. Its non-finite fill error
+  reaches callers as `Error::Computation` through its `ColumnTransformer`, with
+  the original `SimpleImputer` message included (#375).
 - `CONTRIBUTING.md` now tells contributors to implement `Fit<DataFrame>` (not the
   nonexistent two-parameter `Fit<DataFrame, DataFrame>`), and names
   `FitSupervised<DataFrame, DataFrame>` for supervised transformers (#336).
