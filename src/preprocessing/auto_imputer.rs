@@ -244,6 +244,17 @@ impl Default for AutoImputer {
 impl Fit<DataFrame> for AutoImputer {
     type Output = ();
 
+    /// Fit the per-column plan and the delegating [`ColumnTransformer`].
+    ///
+    /// When the heuristic examines a column that contains `+-Inf` alongside
+    /// missing values, `skewness` returns `0.0` because the mean is not finite,
+    /// so it selects [`ImputationStrategy::Mean`] under the default
+    /// `skew_threshold`, and the fit fails because `Mean` cannot produce a
+    /// finite fill. The [`ColumnTransformer`] surfaces that delegated failure
+    /// as [`Error::Computation`], with the [`SimpleImputer`] message included.
+    /// Columns skipped by
+    /// [`high_null_threshold`](AutoImputer::high_null_threshold) and columns
+    /// covered by a forced strategy do not take this path.
     fn fit(&mut self, x: DataFrame) -> Result<()> {
         // Reset first so a failed re-fit cannot leave a stale plan usable by a
         // later transform.
