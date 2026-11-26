@@ -235,8 +235,8 @@ impl ScoreFunction for FClassif {
 /// stronger linear relationship. A feature that is perfectly linearly related
 /// to the target scores positive infinity; a constant feature, a constant
 /// target, and any feature with fewer than three usable observations score
-/// zero. Rows with a null feature value or null target are excluded per column,
-/// and `n` is the number of remaining observations. Deviations outside the
+/// zero. Rows with a null or non-finite feature or target value are excluded per
+/// column, and `n` is the number of remaining observations. Deviations outside the
 /// finite `f64` range are rejected with [`Error::InvalidInput`]; center or
 /// scale the feature and target before scoring.
 ///
@@ -295,7 +295,9 @@ impl ScoreFunction for FRegression {
                 .iter()
                 .zip(&y_vals)
                 .filter_map(|(xv, &yv)| match (xv, yv) {
-                    (Some(value), Some(target)) => Some((value, target)),
+                    (Some(value), Some(target)) if value.is_finite() && target.is_finite() => {
+                        Some((value, target))
+                    }
                     _ => None,
                 })
                 .collect();
@@ -1006,6 +1008,23 @@ mod tests {
         let scores = f_regression_scores(feature, target);
 
         assert_eq!(scores[0].0, "feature");
+        assert_relative_eq!(scores[0].1, 18.0, epsilon = 1e-9);
+    }
+
+    #[test]
+    fn test_f_regression_excludes_non_finite_rows_pairwise() {
+        let feature = Column::from(Series::new(
+            "feature".into(),
+            &[0.0, f64::NAN, 1.0, 9.0, 2.0, f64::INFINITY, 3.0, 9.0],
+        ));
+        let target = Column::from(Series::new(
+            "target".into(),
+            &[0.0, 9.0, 1.0, f64::NAN, 1.0, 9.0, 2.0, f64::NEG_INFINITY],
+        ));
+
+        let scores = f_regression_scores(feature, target);
+
+        // The remaining pairs give r² = 0.9 and n = 4, so F = 18.
         assert_relative_eq!(scores[0].1, 18.0, epsilon = 1e-9);
     }
 
