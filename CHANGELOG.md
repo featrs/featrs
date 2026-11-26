@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `FRegression` skips rows with non-finite feature or target values per
+  feature, so NaN and infinity no longer corrupt feature scores (#342).
 - `MinMaxScaler` now returns `Error::InvalidInput` at fit when a finite
   column's span (`max - min`) overflows f64, matching `StandardScaler` and
   `RobustScaler`, instead of fitting a zero scale that flattens the column
